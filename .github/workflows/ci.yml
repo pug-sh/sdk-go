@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, codegen & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      # buf-setup publishes no moving major tag, so this is pinned exactly. It resolves the
+      # download URL through the GitHub API even for a pinned buf version, and unauthenticated
+      # runners share a 60/hr limit — hence the token.
+      - uses: bufbuild/buf-setup-action@v1.50.0
+        with:
+          version: 1.73.0
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Built with the job's Go rather than downloaded: a release binary built with an older Go
+      # can't load a newer standard library.
+      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+
+      - run: go mod tidy -diff
+
+      - run: make ci
+
+      - name: Check for uncommitted changes
+        run: git diff --exit-code
+
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: [oldstable, stable]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+
+      - run: make test

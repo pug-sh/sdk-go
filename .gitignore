@@ -1,0 +1,13 @@
+# Test and coverage output
+*.test
+*.out
+coverage.*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local secrets
+.env
+.env.*

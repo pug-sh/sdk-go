@@ -1,0 +1,63 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - exhaustive
+    - gosec
+    - intrange
+    - modernize
+    - nilnesserr
+    - noctx
+    - perfsprint
+    - recvcheck
+    - unparam
+    - usetesting
+
+  settings:
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    exhaustive:
+      default-signifies-exhaustive: true
+    gosec:
+      excludes:
+        # Narrowing conversions here follow a range check or a proto-defined width.
+        - G115
+    perfsprint:
+      strconcat: false
+    modernize:
+      # newexpr would rewrite every proto.String/Bool helper into new(x), and new(x) loses the
+      # idiom that marks an optional proto field.
+      disable: [newexpr]
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    paths:
+      - gen
+    rules:
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - gosec
+          - noctx
+          - unparam
+
+formatters:
+  enable:
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/pug-sh/sdk-go
+  exclusions:
+    generated: lax
+    paths:
+      - gen

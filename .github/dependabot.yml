@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # gen/ is produced by the protoc-gen-go and protoc-gen-connect-go versions pinned in go.mod,
+    # so these PRs fail check-codegen until `make protos` is committed onto them. Grouping means
+    # doing that once.
+    groups:
+      protobuf:
+        patterns:
+          - "google.golang.org/protobuf"
+          - "connectrpc.com/connect"
+          - "buf.build/*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

@@ -1,0 +1,39 @@
+# Generates Go protobuf + Connect code for the SDK wire protos, the well-known-event
+# *Properties schemas, and the server-only shared/** services this SDK reads from.
+# Output is committed to gen/ and imported by the SDK and its users.
+#
+# The generators run through `go tool`, so their versions are the ones pinned in go.mod and
+# a fresh generate matches the committed tree byte for byte.
+#
+# buf/validate is deliberately NOT generated: protovalidate-go links its own copy of
+# buf/validate/validate.proto, and linking a second copy panics at init with a protobuf
+# registration conflict. Imports of it are pointed at that copy instead.
+version: v2
+clean: true
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/pug-sh/sdk-go/gen
+    # Keep the upstream Go package names, so generated identifiers read the same as in the
+    # pug monorepo.
+    - file_option: go_package
+      path: common/events/v1
+      value: github.com/pug-sh/sdk-go/gen/common/events/v1;commoneventsv1
+    - file_option: go_package
+      path: sdk/profiles/v1
+      value: github.com/pug-sh/sdk-go/gen/sdk/profiles/v1;sdkprofilesv1
+    - file_option: go_package
+      path: buf/validate/validate.proto
+      value: buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go/buf/validate
+plugins:
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: gen
+    opt: paths=source_relative
+  - local: ["go", "tool", "protoc-gen-connect-go"]
+    out: gen
+    opt: paths=source_relative
+inputs:
+  - directory: proto
+    exclude_paths:
+      - proto/buf
