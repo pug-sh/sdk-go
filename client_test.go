@@ -98,19 +98,45 @@ func TestTrackAfterCloseWarnsAndDrops(t *testing.T) {
 func TestTrackCarriesOptionsThroughToTheEvent(t *testing.T) {
 	events := &fakeEvents{}
 	c, _ := newTestClient(t, rpcClients{events: events}, Options{})
-	c.Track("user_1", "my.custom", WithTimestamp(time.Unix(0, 0)), WithLocation(Location{Country: "DE"}))
+	const session = "0190a5a6-0000-7000-8000-000000000002"
+	c.Track("user_1", "my.custom",
+		WithTimestamp(time.Unix(0, 0)),
+		WithSessionID(session),
+		WithLocation(Location{
+			Continent: "EU", Country: "de", Region: "BE", City: "Berlin", PostalCode: "10115",
+			MetroCode: "1", Timezone: "Europe/Berlin", Coordinates: &Coordinates{Latitude: 52.52, Longitude: 13.405},
+		}),
+	)
+	c.Track("user_1", "my.custom")
 	if err := c.Flush(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	sent := events.sent()
-	if len(sent) != 1 {
+	if len(sent) != 2 {
 		t.Fatalf("sent %d events", len(sent))
 	}
-	if got := sent[0].GetAutoProperties()["$country"].GetStringValue(); got != "DE" {
-		t.Errorf("$country = %q", got)
-	}
-	if got := sent[0].GetOccurTime().GetSeconds(); got != 0 {
+	ev := sent[0]
+	if got := ev.GetOccurTime().GetSeconds(); got != 0 {
 		t.Errorf("occur time = %d", got)
+	}
+	if got := ev.GetSessionId(); got != session {
+		t.Errorf("session id = %q, want %q", got, session)
+	}
+	ap := ev.GetAutoProperties()
+	for key, want := range map[string]string{
+		"$lib": "pug-go", "$sdkVersion": Version, "$platform": "server",
+		"$continent": "EU", "$country": "DE", "$region": "BE", "$city": "Berlin",
+		"$postalCode": "10115", "$metroCode": "1", "$timezone": "Europe/Berlin",
+	} {
+		if got := ap[key].GetStringValue(); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if ap["$latitude"].GetDoubleValue() != 52.52 || ap["$longitude"].GetDoubleValue() != 13.405 {
+		t.Errorf("coordinates = %v, %v", ap["$latitude"], ap["$longitude"])
+	}
+	if got := sent[1].GetSessionId(); got != testSession {
+		t.Errorf("default session id = %q, want the client's %q", got, testSession)
 	}
 }
 
