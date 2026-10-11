@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/pug-sh/sdk-go/gen/sdk/events/v1/eventsv1connect"
 	sdkprofilesv1 "github.com/pug-sh/sdk-go/gen/sdk/profiles/v1"
 	"github.com/pug-sh/sdk-go/gen/sdk/profiles/v1/sdkprofilesv1connect"
+	"github.com/pug-sh/sdk-go/internal/ingest"
 )
 
 const testSession = "0190a5a6-0000-7000-8000-000000000001"
@@ -73,10 +75,46 @@ func (l *logs) find(t *testing.T, level slog.Level, substr string) record {
 	return record{}
 }
 
-func newLogs() (*logs, logger) {
+func newLogs() (*logs, ingest.Logger) {
 	l := &logs{}
-	return l, logger{slog.New(l)}
+	return l, ingest.NewLogger(slog.New(l))
 }
+
+func ids(events []*Event) string {
+	out := make([]string, len(events))
+	for i, e := range events {
+		out[i] = e.GetEventId()
+	}
+	return strings.Join(out, ",")
+}
+
+type deadLetter struct {
+	err error
+	ids string
+}
+
+// deadLetters records what OnError receives.
+type deadLetters struct {
+	mu  sync.Mutex
+	got []deadLetter
+}
+
+func (d *deadLetters) record(err error, events []*Event) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.got = append(d.got, deadLetter{err, ids(events)})
+}
+
+func (d *deadLetters) all() []deadLetter {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.got)
+}
+
+// panicky is a property value whose JSON encoding panics.
+type panicky struct{}
+
+func (panicky) MarshalJSON() ([]byte, error) { panic("boom") }
 
 type fakeEvents struct {
 	eventsv1connect.EventsServiceClient
@@ -85,11 +123,16 @@ type fakeEvents struct {
 	batches [][]*eventsv1.Event
 	res     *eventsv1.BatchCreateResponse
 	err     error
+	// panicWith, when set, makes BatchCreate panic with it.
+	panicWith string
 }
 
 func (f *fakeEvents) BatchCreate(_ context.Context, req *connect.Request[eventsv1.BatchCreateRequest]) (*connect.Response[eventsv1.BatchCreateResponse], error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.panicWith != "" {
+		panic(f.panicWith)
+	}
 	if f.err != nil {
 		return nil, f.err
 	}

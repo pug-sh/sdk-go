@@ -1,4 +1,4 @@
-package pug
+package ingest
 
 import (
 	"context"
@@ -41,7 +41,7 @@ type fakeSink struct {
 	fail  func(ctx context.Context, call int, events []*eventsv1.Event) error
 }
 
-func (s *fakeSink) send(ctx context.Context, events []*eventsv1.Event) error {
+func (s *fakeSink) Send(ctx context.Context, events []*eventsv1.Event) error {
 	s.mu.Lock()
 	s.calls++
 	call, fail := s.calls, s.fail
@@ -79,7 +79,7 @@ type deadLetters struct {
 	got []deadLetter
 }
 
-func (d *deadLetters) record(err error, events []*Event) {
+func (d *deadLetters) record(err error, events []*eventsv1.Event) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.got = append(d.got, deadLetter{err, ids(events)})
@@ -93,10 +93,10 @@ func (d *deadLetters) all() []deadLetter {
 
 var smallBatch = BatchConfig{MaxSize: 3, MaxWait: 10 * time.Second, MaxQueueSize: 5}
 
-func newTestBatcher(s sink, cfg BatchConfig) (*batcher, *deadLetters, *logs) {
+func newTestBatcher(s Sink, cfg BatchConfig) (*Batcher, *deadLetters, *logs) {
 	l, log := newLogs()
 	dl := &deadLetters{}
-	return newBatcher(s, cfg, dl.record, log, 10*time.Second), dl, l
+	return NewBatcher(s, cfg, dl.record, log, 10*time.Second), dl, l
 }
 
 func wantBatches(t *testing.T, s *fakeSink, want ...string) {
@@ -110,12 +110,12 @@ func TestBatchFlushesAtMaxSize(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{}
 		b, _, _ := newTestBatcher(s, smallBatch)
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		b.enqueue(ev(2))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		b.Enqueue(ev(2))
 		synctest.Wait()
 		wantBatches(t, s)
-		b.enqueue(ev(3))
+		b.Enqueue(ev(3))
 		synctest.Wait()
 		wantBatches(t, s, "1,2,3")
 	})
@@ -125,9 +125,9 @@ func TestBatchFlushSendsTheBuffer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{}
 		b, _, _ := newTestBatcher(s, smallBatch)
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		if err := b.flush(t.Context()); err != nil {
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		if err := b.Flush(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		wantBatches(t, s, "1")
@@ -139,14 +139,14 @@ func TestBatchDeadLettersPermanentErrors(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			s := &fakeSink{fail: func(context.Context, int, []*eventsv1.Event) error { return perm }}
 			b, dl, l := newTestBatcher(s, smallBatch)
-			defer b.close(t.Context())
-			b.enqueue(ev(1))
-			_ = b.flush(t.Context())
+			defer b.Close(t.Context())
+			b.Enqueue(ev(1))
+			_ = b.Flush(t.Context())
 			if got := dl.all(); len(got) != 1 || got[0].ids != "1" || !errors.Is(got[0].err, perm) {
 				t.Errorf("dead letters = %v", got)
 			}
 			l.find(t, slog.LevelError, "permanent send failure")
-			_ = b.flush(t.Context())
+			_ = b.Flush(t.Context())
 			if n := s.callCount(); n != 1 {
 				t.Errorf("sent %d times, want no retry", n)
 			}
@@ -163,15 +163,15 @@ func TestBatchRetriesTransientErrors(t *testing.T) {
 			return nil
 		}}
 		b, dl, l := newTestBatcher(s, BatchConfig{MaxSize: 99, MaxWait: 10 * time.Second})
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		_ = b.flush(t.Context())
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		_ = b.Flush(t.Context())
 		wantBatches(t, s)
 		if got := dl.all(); len(got) != 0 {
 			t.Errorf("dead letters = %v", got)
 		}
 		l.find(t, slog.LevelWarn, "transient send failure")
-		_ = b.flush(t.Context())
+		_ = b.Flush(t.Context())
 		wantBatches(t, s, "1")
 	})
 }
@@ -180,15 +180,15 @@ func TestBatchDropsOldestOnOverflow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{}
 		b, dl, l := newTestBatcher(s, BatchConfig{MaxSize: 99, MaxWait: 10 * time.Second, MaxQueueSize: 2})
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		b.enqueue(ev(2))
-		b.enqueue(ev(3))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		b.Enqueue(ev(2))
+		b.Enqueue(ev(3))
 		if got := dl.all(); len(got) != 1 || got[0].ids != "1" || !errors.Is(got[0].err, ErrQueueOverflow) {
 			t.Errorf("dead letters = %v", got)
 		}
 		l.find(t, slog.LevelWarn, "queue full")
-		_ = b.flush(t.Context())
+		_ = b.Flush(t.Context())
 		wantBatches(t, s, "2,3")
 	})
 }
@@ -197,12 +197,12 @@ func TestBatchCloseDrainsAndRejectsLaterEvents(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{}
 		b, dl, _ := newTestBatcher(s, smallBatch)
-		b.enqueue(ev(1))
-		if err := b.close(t.Context()); err != nil {
+		b.Enqueue(ev(1))
+		if err := b.Close(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		wantBatches(t, s, "1")
-		b.enqueue(ev(2))
+		b.Enqueue(ev(2))
 		if got := dl.all(); len(got) != 1 || got[0].ids != "2" || !errors.Is(got[0].err, ErrClosed) {
 			t.Errorf("dead letters = %v", got)
 		}
@@ -213,10 +213,10 @@ func TestBatchFlushesOnMaxWait(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{}
 		b, _, _ := newTestBatcher(s, BatchConfig{MaxSize: 99, MaxWait: 50 * time.Millisecond})
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
 		time.Sleep(30 * time.Millisecond)
-		b.enqueue(ev(2))
+		b.Enqueue(ev(2))
 		synctest.Wait()
 		wantBatches(t, s)
 		// The wait runs from the first buffered event; later ones don't push it back.
@@ -235,12 +235,12 @@ func TestBatchSplitsIntoMaxSizeChunks(t *testing.T) {
 			return nil
 		}}
 		b, _, _ := newTestBatcher(s, BatchConfig{MaxSize: 2, MaxWait: 10 * time.Second})
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		b.enqueue(ev(2))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		b.Enqueue(ev(2))
 		synctest.Wait()
-		b.enqueue(ev(3))
-		_ = b.flush(t.Context())
+		b.Enqueue(ev(3))
+		_ = b.Flush(t.Context())
 		wantBatches(t, s, "1,2", "3")
 	})
 }
@@ -251,11 +251,11 @@ func TestBatchSplitsByBytes(t *testing.T) {
 		e.CustomProperties = map[string]*commonv1.PropertyValue{}
 		value := strings.Repeat("x", maxStringBytes)
 		for i := range 1500 {
-			e.CustomProperties[fmt.Sprintf("p%04d", i)] = stringValue(logger{}, value)
+			e.CustomProperties[fmt.Sprintf("p%04d", i)] = stringValue(Logger{}, value)
 		}
 		return e
 	}
-	b := &batcher{maxSize: 100}
+	b := &Batcher{maxSize: 100}
 	chunks := b.split([]*eventsv1.Event{big(1), big(2), big(3), ev(4)})
 	var got []string
 	for _, c := range chunks {
@@ -277,17 +277,17 @@ func TestBatchInvalidConfigFallsBackWithWarning(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{}
 		b, _, l := newTestBatcher(s, BatchConfig{MaxSize: -1, MaxWait: -time.Second, MaxQueueSize: -5})
-		defer b.close(t.Context())
+		defer b.Close(t.Context())
 		if b.maxSize != defaultMaxSize || b.maxWait != defaultMaxWait || b.maxQueue != defaultMaxQueueSize {
 			t.Errorf("settings = %d %v %d", b.maxSize, b.maxWait, b.maxQueue)
 		}
 		if n := len(l.warns()); n != 3 {
 			t.Errorf("got %d warnings, want 3: %v", n, l.records)
 		}
-		b.enqueue(ev(1))
+		b.Enqueue(ev(1))
 		synctest.Wait()
 		wantBatches(t, s)
-		_ = b.flush(t.Context())
+		_ = b.Flush(t.Context())
 		wantBatches(t, s, "1")
 	})
 }
@@ -295,7 +295,7 @@ func TestBatchInvalidConfigFallsBackWithWarning(t *testing.T) {
 func TestBatchClampsMaxSize(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b, _, l := newTestBatcher(&fakeSink{}, BatchConfig{MaxSize: 5000})
-		defer b.close(t.Context())
+		defer b.Close(t.Context())
 		if b.maxSize != maxBatchEvents {
 			t.Errorf("maxSize = %d", b.maxSize)
 		}
@@ -307,11 +307,11 @@ func TestBatchCloseDeadLettersTransientFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{fail: func(context.Context, int, []*eventsv1.Event) error { return errUnavailable }}
 		b, dl, l := newTestBatcher(s, BatchConfig{MaxSize: 99, MaxWait: 10 * time.Second})
-		b.enqueue(ev(1))
-		if err := b.close(t.Context()); err != nil {
+		b.Enqueue(ev(1))
+		if err := b.Close(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		if got := dl.all(); len(got) != 1 || got[0].ids != "1" || !errors.Is(got[0].err, ErrUnavailable) {
+		if got := dl.all(); len(got) != 1 || got[0].ids != "1" || !errors.Is(got[0].err, errUnavailable) {
 			t.Errorf("dead letters = %v", got)
 		}
 		l.find(t, slog.LevelError, "client closed")
@@ -333,16 +333,16 @@ func TestBatchPreservesOrderAcrossFailedChunks(t *testing.T) {
 			return nil
 		}}
 		b, _, _ := newTestBatcher(s, BatchConfig{MaxSize: 2, MaxWait: 10 * time.Second})
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		b.enqueue(ev(2))
-		_ = b.flush(t.Context())
-		b.enqueue(ev(3))
-		_ = b.flush(t.Context())
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		b.Enqueue(ev(2))
+		_ = b.Flush(t.Context())
+		b.Enqueue(ev(3))
+		_ = b.Flush(t.Context())
 		failing.Lock()
 		down = false
 		failing.Unlock()
-		_ = b.flush(t.Context())
+		_ = b.Flush(t.Context())
 		wantBatches(t, s, "1,2", "3")
 	})
 }
@@ -364,13 +364,13 @@ func TestBatchStopsAtFirstTransientFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, release := gatedSink()
 		b, dl, _ := newTestBatcher(s, BatchConfig{MaxSize: 2, MaxWait: 10 * time.Second})
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		b.enqueue(ev(2))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		b.Enqueue(ev(2))
 		synctest.Wait()
-		b.enqueue(ev(3))
-		b.enqueue(ev(4))
-		b.enqueue(ev(5))
+		b.Enqueue(ev(3))
+		b.Enqueue(ev(4))
+		b.Enqueue(ev(5))
 		release <- nil
 		synctest.Wait()
 		release <- errUnavailable
@@ -382,7 +382,7 @@ func TestBatchStopsAtFirstTransientFailure(t *testing.T) {
 			release <- nil
 			release <- nil
 		}()
-		_ = b.flush(t.Context())
+		_ = b.Flush(t.Context())
 		wantBatches(t, s, "1,2", "3,4", "5")
 		if got := dl.all(); len(got) != 0 {
 			t.Errorf("dead letters = %v", got)
@@ -394,13 +394,13 @@ func TestBatchPermanentFailureMovesOnToTheNextChunk(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, release := gatedSink()
 		b, dl, _ := newTestBatcher(s, BatchConfig{MaxSize: 2, MaxWait: 10 * time.Second})
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		b.enqueue(ev(2))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		b.Enqueue(ev(2))
 		synctest.Wait()
-		b.enqueue(ev(3))
-		b.enqueue(ev(4))
-		b.enqueue(ev(5))
+		b.Enqueue(ev(3))
+		b.Enqueue(ev(4))
+		b.Enqueue(ev(5))
 		bad := connect.NewError(connect.CodePermissionDenied, errors.New("denied"))
 		release <- nil
 		synctest.Wait()
@@ -424,11 +424,11 @@ func TestBatchBacksOffAfterTransientFailure(t *testing.T) {
 			return nil
 		}}
 		b, _, _ := newTestBatcher(s, BatchConfig{MaxSize: 1, MaxWait: 5 * time.Second})
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
 		synctest.Wait()
-		b.enqueue(ev(2))
-		b.enqueue(ev(3))
+		b.Enqueue(ev(2))
+		b.Enqueue(ev(3))
 		synctest.Wait()
 		if n := s.callCount(); n != 1 {
 			t.Fatalf("calls = %d; a size trigger during backoff must not retry at once", n)
@@ -443,13 +443,13 @@ func TestBatchRequeueRespectsMaxQueueSize(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, release := gatedSink()
 		b, dl, _ := newTestBatcher(s, BatchConfig{MaxSize: 2, MaxWait: 10 * time.Second, MaxQueueSize: 3})
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		b.enqueue(ev(2))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		b.Enqueue(ev(2))
 		synctest.Wait()
-		b.enqueue(ev(3))
-		b.enqueue(ev(4))
-		b.enqueue(ev(5))
+		b.Enqueue(ev(3))
+		b.Enqueue(ev(4))
+		b.Enqueue(ev(5))
 		release <- errUnavailable
 		synctest.Wait()
 		if got := dl.all(); len(got) != 1 || got[0].ids != "1,2" || !errors.Is(got[0].err, ErrQueueOverflow) {
@@ -459,7 +459,7 @@ func TestBatchRequeueRespectsMaxQueueSize(t *testing.T) {
 			release <- nil
 			release <- nil
 		}()
-		_ = b.flush(t.Context())
+		_ = b.Flush(t.Context())
 		wantBatches(t, s, "3,4", "5")
 	})
 }
@@ -468,19 +468,19 @@ func TestBatchCloseWithExpiredContextReportsTheRest(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, _ := gatedSink()
 		b, dl, _ := newTestBatcher(s, BatchConfig{MaxSize: 2, MaxWait: 10 * time.Second})
-		b.enqueue(ev(1))
-		b.enqueue(ev(2))
+		b.Enqueue(ev(1))
+		b.Enqueue(ev(2))
 		synctest.Wait()
-		b.enqueue(ev(3))
-		b.enqueue(ev(4))
-		b.enqueue(ev(5))
+		b.Enqueue(ev(3))
+		b.Enqueue(ev(4))
+		b.Enqueue(ev(5))
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		if err := b.close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		if err := b.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("close = %v, want the deadline", err)
 		}
 		got := dl.all()
-		if len(got) != 2 || got[0].ids != "1,2" || !errors.Is(got[0].err, ErrCanceled) ||
+		if len(got) != 2 || got[0].ids != "1,2" || connect.CodeOf(got[0].err) != connect.CodeCanceled ||
 			got[1].ids != "3,4,5" || !errors.Is(got[1].err, ErrClosed) {
 			t.Errorf("dead letters = %v", got)
 		}
@@ -491,10 +491,10 @@ func TestBatchSendIsBoundedByTheTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, _ := gatedSink()
 		b, dl, _ := newTestBatcher(s, smallBatch)
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
 		start := time.Now()
-		_ = b.flush(t.Context())
+		_ = b.Flush(t.Context())
 		if elapsed := time.Since(start); elapsed != 10*time.Second {
 			t.Errorf("flush took %v, want the 10s send timeout", elapsed)
 		}
@@ -508,11 +508,11 @@ func TestBatchFlushHonorsItsContext(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, release := gatedSink()
 		b, _, _ := newTestBatcher(s, smallBatch)
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		if err := b.flush(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		if err := b.Flush(ctx); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("flush = %v", err)
 		}
 		release <- nil
@@ -524,13 +524,13 @@ func TestBatchFlushHonorsItsContext(t *testing.T) {
 func TestBatchFlushAndCloseAfterClose(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b, _, _ := newTestBatcher(&fakeSink{}, smallBatch)
-		if err := b.close(t.Context()); err != nil {
+		if err := b.Close(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		if err := b.flush(t.Context()); err != nil {
+		if err := b.Flush(t.Context()); err != nil {
 			t.Errorf("flush after close = %v", err)
 		}
-		if err := b.close(t.Context()); err != nil {
+		if err := b.Close(t.Context()); err != nil {
 			t.Errorf("second close = %v", err)
 		}
 	})
@@ -539,10 +539,10 @@ func TestBatchFlushAndCloseAfterClose(t *testing.T) {
 func TestBatchContainsPanickingOnError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l, log := newLogs()
-		b := newBatcher(&fakeSink{}, BatchConfig{MaxSize: 99, MaxQueueSize: 1}, func(error, []*Event) { panic("callback boom") }, log, time.Second)
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		b.enqueue(ev(2))
+		b := NewBatcher(&fakeSink{}, BatchConfig{MaxSize: 99, MaxQueueSize: 1}, func(error, []*eventsv1.Event) { panic("callback boom") }, log, time.Second)
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		b.Enqueue(ev(2))
 		l.find(t, slog.LevelError, "OnError panicked")
 	})
 }
@@ -551,10 +551,10 @@ func TestBatchRecoversFromAPanickingSink(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{fail: func(context.Context, int, []*eventsv1.Event) error { panic("sink boom") }}
 		b, dl, _ := newTestBatcher(s, smallBatch)
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
-		_ = b.flush(t.Context())
-		if got := dl.all(); len(got) != 1 || got[0].err.Error() != "pug: sending batch panicked: sink boom" {
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
+		_ = b.Flush(t.Context())
+		if got := dl.all(); len(got) != 1 || !strings.Contains(got[0].err.Error(), "sink boom") {
 			t.Errorf("dead letters = %v", got)
 		}
 	})
@@ -575,14 +575,14 @@ func TestBatchAccountsForEveryEvent(t *testing.T) {
 	}}
 	l, log := newLogs()
 	dl := &deadLetters{}
-	b := newBatcher(s, BatchConfig{MaxSize: 50, MaxWait: time.Millisecond, MaxQueueSize: 500}, dl.record, log, time.Second)
+	b := NewBatcher(s, BatchConfig{MaxSize: 50, MaxWait: time.Millisecond, MaxQueueSize: 500}, dl.record, log, time.Second)
 
 	const producers, perProducer = 8, 500
 	var wg sync.WaitGroup
 	for p := range producers {
 		wg.Go(func() {
 			for i := range perProducer {
-				b.enqueue(ev(p*perProducer + i))
+				b.Enqueue(ev(p*perProducer + i))
 			}
 		})
 	}
@@ -595,14 +595,14 @@ func TestBatchAccountsForEveryEvent(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				_ = b.flush(context.Background())
+				_ = b.Flush(context.Background())
 			}
 		}
 	}()
 	wg.Wait()
 	close(stop)
 	<-flushed
-	if err := b.close(context.Background()); err != nil {
+	if err := b.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -645,17 +645,17 @@ func TestBatchCloseDoesNotSendAfterItsFlush(t *testing.T) {
 				return connect.NewError(connect.CodeCanceled, ctx.Err())
 			}}
 			b, dl, _ := newTestBatcher(s, BatchConfig{MaxSize: 1, MaxWait: 10 * time.Second})
-			b.enqueue(ev(1))
+			b.Enqueue(ev(1))
 			synctest.Wait()
-			b.enqueue(ev(2))
-			b.enqueue(ev(3))
-			b.enqueue(ev(4))
+			b.Enqueue(ev(2))
+			b.Enqueue(ev(3))
+			b.Enqueue(ev(4))
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			closed := make(chan error, 1)
-			go func() { closed <- b.close(ctx) }()
+			go func() { closed <- b.Close(ctx) }()
 			synctest.Wait()
-			go func() { _ = b.flush(context.Background()) }()
+			go func() { _ = b.Flush(context.Background()) }()
 			synctest.Wait()
 			start := time.Now()
 			release <- nil
@@ -685,12 +685,12 @@ func TestBatchLogsEveryDropWithoutOnError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{fail: func(context.Context, int, []*eventsv1.Event) error { return errUnavailable }}
 		l, log := newLogs()
-		b := newBatcher(s, BatchConfig{MaxSize: 1, MaxWait: 10 * time.Second}, nil, log, time.Second)
-		b.enqueue(ev(1))
+		b := NewBatcher(s, BatchConfig{MaxSize: 1, MaxWait: 10 * time.Second}, nil, log, time.Second)
+		b.Enqueue(ev(1))
 		synctest.Wait()
-		b.enqueue(ev(2))
-		b.enqueue(ev(3))
-		if err := b.close(t.Context()); err != nil {
+		b.Enqueue(ev(2))
+		b.Enqueue(ev(3))
+		if err := b.Close(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		if got := l.find(t, slog.LevelError, "events dropped after a transient send failure").attrs["events"]; got != int64(1) {
@@ -699,7 +699,7 @@ func TestBatchLogsEveryDropWithoutOnError(t *testing.T) {
 		if got := l.find(t, slog.LevelError, "client closed with undelivered events").attrs["events"]; got != int64(2) {
 			t.Errorf("leftovers logged with events=%v, want 2", got)
 		}
-		b.enqueue(ev(4))
+		b.Enqueue(ev(4))
 		l.find(t, slog.LevelWarn, "client closed; event dropped")
 	})
 }
@@ -716,12 +716,12 @@ func TestBatchRetryWaitsMaxWaitFromTheFailure(t *testing.T) {
 			return nil
 		}}
 		b, _, _ := newTestBatcher(s, BatchConfig{MaxSize: 99, MaxWait: 2 * time.Second})
-		defer b.close(t.Context())
-		b.enqueue(ev(1))
+		defer b.Close(t.Context())
+		b.Enqueue(ev(1))
 		time.Sleep(2 * time.Second)
 		synctest.Wait()
 		time.Sleep(50 * time.Millisecond)
-		b.enqueue(ev(2))
+		b.Enqueue(ev(2))
 		time.Sleep(1850 * time.Millisecond)
 		release <- errUnavailable
 		synctest.Wait()

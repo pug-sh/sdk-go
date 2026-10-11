@@ -4,6 +4,17 @@ import (
 	"errors"
 
 	"connectrpc.com/connect"
+
+	"github.com/pug-sh/sdk-go/internal/ingest"
+)
+
+var (
+	// ErrClosed is reported to OnError for events that arrived after Close or were still
+	// undelivered when it finished.
+	ErrClosed = ingest.ErrClosed
+	// ErrQueueOverflow is reported to OnError for the oldest events, dropped to make room
+	// when the buffer is full.
+	ErrQueueOverflow = ingest.ErrQueueOverflow
 )
 
 // Error is the error returned by the read methods and handed to [OnError] when a send fails.
@@ -66,6 +77,15 @@ var (
 	ErrDataLoss           error = codeError(connect.CodeDataLoss)
 	ErrUnauthenticated    error = codeError(connect.CodeUnauthenticated)
 )
+
+// sendError is how a dead letter's error reaches OnError: the queue's own sentinels as they
+// are, and a failed send as an *Error, like a read's.
+func sendError(err error) error {
+	if errors.Is(err, ErrClosed) || errors.Is(err, ErrQueueOverflow) {
+		return err
+	}
+	return toError(err)
+}
 
 func toError(err error) *Error {
 	if perr, ok := err.(*Error); ok { //nolint:errorlint // only an unwrapped *Error passes through as is

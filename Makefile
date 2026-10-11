@@ -33,7 +33,8 @@ sync-protos:
 
 # Regenerate the committed Go code from the vendored proto/ mirror. The plugins run through
 # `go tool`, pinned in go.mod. If the well-known-event catalog changes, the catalog golden test
-# fails until `go test -run TestWellKnownCatalogMatchesGolden -update .` is run and reviewed.
+# fails until `go test ./internal/ingest -run TestWellKnownCatalogMatchesGolden -update` is run
+# and reviewed.
 protos:
 	@command -v buf >/dev/null || { echo "buf CLI required: https://buf.build/docs/installation"; exit 1; }
 	buf generate

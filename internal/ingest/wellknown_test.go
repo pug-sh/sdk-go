@@ -1,4 +1,4 @@
-package pug
+package ingest
 
 import (
 	"flag"

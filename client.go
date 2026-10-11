@@ -28,6 +28,7 @@ import (
 	"github.com/pug-sh/sdk-go/gen/shared/activity/v1/activityv1connect"
 	"github.com/pug-sh/sdk-go/gen/shared/insights/v1/insightsv1connect"
 	"github.com/pug-sh/sdk-go/gen/shared/profiles/v1/profilesv1connect"
+	"github.com/pug-sh/sdk-go/internal/ingest"
 )
 
 const (
@@ -88,12 +89,12 @@ type Client struct {
 	// Insights runs analytics queries.
 	Insights *InsightsClient
 
-	rpc       rpcClients
-	queue     *batcher
-	log       logger
-	timeout   time.Duration
-	sessionID string
-	closed    atomic.Bool
+	rpc     rpcClients
+	events  ingest.Builder
+	queue   *ingest.Batcher
+	log     ingest.Logger
+	timeout time.Duration
+	closed  atomic.Bool
 }
 
 // New returns a Client. It fails only on unusable options: a missing, malformed or non-private
@@ -125,16 +126,21 @@ func New(opts Options) (*Client, error) {
 }
 
 func newClient(rpc rpcClients, opts Options, sessionID string) *Client {
-	log := logger{opts.Logger}
+	log := ingest.NewLogger(opts.Logger)
 	timeout := opts.Timeout
 	if timeout < 0 {
-		log.warn("Timeout must not be negative; using the default", "value", timeout, "default", defaultTimeout)
+		log.Warn("Timeout must not be negative; using the default", "value", timeout, "default", defaultTimeout)
 	}
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	c := &Client{rpc: rpc, log: log, timeout: timeout, sessionID: sessionID}
-	c.queue = newBatcher(eventSink{client: rpc.events, log: log}, opts.Batch, opts.OnError, log, timeout)
+	c := &Client{rpc: rpc, log: log, timeout: timeout}
+	c.events = ingest.Builder{Log: log, SessionID: sessionID, Version: Version}
+	var onError func(error, []*Event)
+	if opts.OnError != nil {
+		onError = func(err error, events []*Event) { opts.OnError(sendError(err), events) }
+	}
+	c.queue = ingest.NewBatcher(eventSink{client: rpc.events, log: log}, ingest.BatchConfig(opts.Batch), onError, log, timeout)
 	c.Profiles = &ProfilesClient{c}
 	c.Activity = &ActivityClient{c}
 	c.Insights = &InsightsClient{c}
@@ -154,8 +160,9 @@ func (c *Client) Track(distinctID, kind string, opts ...TrackOption) {
 	if !c.accept(distinctID, kind) {
 		return
 	}
-	if ev := toEvent(c.log, kind, c.sessionID, distinctID, trackOpts(opts)); ev != nil {
-		c.queue.enqueue(ev)
+	o := trackOpts(opts)
+	if ev := c.events.Build(kind, distinctID, o.props, o.Options); ev != nil {
+		c.queue.Enqueue(ev)
 	}
 }
 
@@ -167,36 +174,37 @@ func (c *Client) Track(distinctID, kind string, opts ...TrackOption) {
 func (c *Client) TrackWellKnown(distinctID string, event proto.Message, opts ...TrackOption) {
 	defer c.recoverPanic("TrackWellKnown", "message", fmt.Sprintf("%T", event))
 	if event == nil {
-		c.log.error("TrackWellKnown requires an event message")
+		c.log.Error("TrackWellKnown requires an event message")
 		return
 	}
 	msg := event.ProtoReflect()
-	kind, ok := wellKnown().byName[msg.Descriptor().FullName()]
+	kind, ok := ingest.WellKnownKind(msg.Descriptor().FullName())
 	if !ok {
-		c.log.error("TrackWellKnown requires a well-known server event message", "message", msg.Descriptor().FullName())
+		c.log.Error("TrackWellKnown requires a well-known server event message", "message", msg.Descriptor().FullName())
 		return
 	}
 	if !c.accept(distinctID, kind) {
 		return
 	}
-	if ev := toWellKnownEvent(c.log, kind, c.sessionID, distinctID, msg, trackOpts(opts)); ev != nil {
-		c.queue.enqueue(ev)
+	o := trackOpts(opts)
+	if ev := c.events.BuildWellKnown(kind, distinctID, msg, o.props, o.Options); ev != nil {
+		c.queue.Enqueue(ev)
 	}
 }
 
 func (c *Client) accept(distinctID, kind string) bool {
 	switch {
 	case c.closed.Load():
-		c.log.warn("Track called after Close; event dropped", "kind", kind)
+		c.log.Warn("Track called after Close; event dropped", "kind", kind)
 	case distinctID == "":
-		c.log.error("Track requires a non-empty distinctID", "kind", kind)
+		c.log.Error("Track requires a non-empty distinctID", "kind", kind)
 	// The server rejects a whole batch over one such id, taking other users' events with it.
 	case strings.HasPrefix(distinctID, reservedPrefix):
-		c.log.error("Track distinctID must not start with the reserved 'cookieless-' prefix", "kind", kind)
+		c.log.Error("Track distinctID must not start with the reserved 'cookieless-' prefix", "kind", kind)
 	// protobuf-go refuses to marshal a string that isn't UTF-8, which would fail the whole
 	// batch.
 	case !utf8.ValidString(distinctID):
-		c.log.error("Track distinctID must be valid UTF-8", "kind", kind)
+		c.log.Error("Track distinctID must be valid UTF-8", "kind", kind)
 	default:
 		return true
 	}
@@ -209,11 +217,11 @@ func (c *Client) accept(distinctID, kind string) bool {
 func (c *Client) Identify(ctx context.Context, externalID string, opts ...IdentifyOption) {
 	defer c.recoverPanic("Identify")
 	if c.closed.Load() {
-		c.log.warn("Identify called after Close; dropped")
+		c.log.Warn("Identify called after Close; dropped")
 		return
 	}
 	if externalID == "" {
-		c.log.error("Identify requires a non-empty externalID")
+		c.log.Error("Identify requires a non-empty externalID")
 		return
 	}
 	var o identifyOptions
@@ -224,7 +232,7 @@ func (c *Client) Identify(ctx context.Context, externalID string, opts ...Identi
 		opt.applyIdentify(&o)
 	}
 	if !utf8.ValidString(externalID) || !utf8.ValidString(o.anonymousID) || !utf8.ValidString(o.deviceID) {
-		c.log.error("Identify ids must be valid UTF-8")
+		c.log.Error("Identify ids must be valid UTF-8")
 		return
 	}
 	req := &sdkprofilesv1.IdentifyRequest{ExternalId: proto.String(externalID)}
@@ -237,19 +245,19 @@ func (c *Client) Identify(ctx context.Context, externalID string, opts ...Identi
 	if o.traits != nil {
 		s, err := toStruct(o.traits)
 		if err != nil {
-			c.log.error("Identify traits must be JSON-serializable", "err", err)
+			c.log.Error("Identify traits must be JSON-serializable", "err", err)
 			return
 		}
 		req.Traits = s
 	}
 	if err := protovalidate.GlobalValidator.Validate(req); err != nil {
-		c.log.error("invalid identify request", "violations", violations(err))
+		c.log.Error("invalid identify request", "violations", ingest.Violations(err))
 		return
 	}
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 	if _, err := c.rpc.profilesSDK.Identify(ctx, connect.NewRequest(req)); err != nil {
-		c.log.error("identify failed", "external_id", externalID, "err", err)
+		c.log.Error("identify failed", "external_id", externalID, "err", err)
 	}
 }
 
@@ -272,7 +280,7 @@ func toStruct(traits Traits) (*structpb.Struct, error) {
 // queue: a transient failure keeps events queued for a later retry. Use Close to drain on
 // shutdown.
 func (c *Client) Flush(ctx context.Context) error {
-	return c.queue.flush(ctx)
+	return c.queue.Flush(ctx)
 }
 
 // Close drains the buffer and stops the background sender; later Track and Identify calls
@@ -281,7 +289,7 @@ func (c *Client) Flush(ctx context.Context) error {
 // finished.
 func (c *Client) Close(ctx context.Context) error {
 	c.closed.Store(true)
-	return c.queue.close(ctx)
+	return c.queue.Close(ctx)
 }
 
 func (c *Client) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -295,7 +303,7 @@ func (c *Client) withTimeout(ctx context.Context) (context.Context, context.Canc
 // from user code they call into, such as a MarshalJSON method in traits.
 func (c *Client) recoverPanic(method string, args ...any) {
 	if r := recover(); r != nil {
-		c.log.error("unexpected panic in "+method, append(args, "panic", r)...)
+		c.log.Error("unexpected panic in "+method, append(args, "panic", r)...)
 	}
 }
 
@@ -342,17 +350,17 @@ func (apiKeyInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc)
 
 type eventSink struct {
 	client eventsv1connect.EventsServiceClient
-	log    logger
+	log    ingest.Logger
 }
 
-func (s eventSink) send(ctx context.Context, events []*eventsv1.Event) error {
+func (s eventSink) Send(ctx context.Context, events []*eventsv1.Event) error {
 	res, err := s.client.BatchCreate(ctx, connect.NewRequest(&eventsv1.BatchCreateRequest{Events: events}))
 	if err != nil {
 		return err
 	}
 	// A refused event isn't an RPC error, so this is the only sign it was lost.
 	if dropped := res.Msg.GetDropped(); dropped > 0 {
-		s.log.warn("server dropped events", "dropped", dropped, "sent", len(events), "reasons", res.Msg.GetDroppedByReason())
+		s.log.Warn("server dropped events", "dropped", dropped, "sent", len(events), "reasons", res.Msg.GetDroppedByReason())
 	}
 	return nil
 }

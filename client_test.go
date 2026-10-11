@@ -48,7 +48,7 @@ func TestNewAppliesDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close(t.Context())
-	if c.timeout != defaultTimeout || c.sessionID == "" || c.Profiles == nil || c.Activity == nil || c.Insights == nil {
+	if c.timeout != defaultTimeout || c.events.SessionID == "" || c.Profiles == nil || c.Activity == nil || c.Insights == nil {
 		t.Errorf("client = %+v", c)
 	}
 }
@@ -107,7 +107,7 @@ func TestTrackCarriesOptionsThroughToTheEvent(t *testing.T) {
 			MetroCode: "1", Timezone: "Europe/Berlin", Coordinates: &Coordinates{Latitude: 52.52, Longitude: 13.405},
 		}),
 	)
-	c.Track("user_1", "my.custom")
+	c.Track("user_1", "my.custom", WithSessionID(""))
 	if err := c.Flush(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -244,12 +244,42 @@ func TestOnErrorReceivesUndeliverableEvents(t *testing.T) {
 	}
 }
 
+// The batcher dead-letters raw errors; OnError gets a failed send as an *Error, like a read's.
+func TestOnErrorReceivesAPanickingSendAsAnError(t *testing.T) {
+	dl := &deadLetters{}
+	c, _ := newTestClient(t, rpcClients{events: &fakeEvents{panicWith: "sink boom"}}, Options{OnError: dl.record})
+	c.Track("user_1", "my.custom")
+	_ = c.Flush(t.Context())
+	got := dl.all()
+	if len(got) != 1 || got[0].err.Error() != "pug: sending batch panicked: sink boom" {
+		t.Fatalf("dead letters = %v", got)
+	}
+	if _, ok := errors.AsType[*Error](got[0].err); !ok {
+		t.Errorf("err = %#v, want an *Error", got[0].err)
+	}
+}
+
+func TestOnErrorReceivesAFailedSendAtCloseAsAnError(t *testing.T) {
+	dl := &deadLetters{}
+	events := &fakeEvents{err: connect.NewError(connect.CodeUnavailable, errors.New("down"))}
+	c, _ := newTestClient(t, rpcClients{events: events}, Options{OnError: dl.record})
+	c.Track("user_1", "my.custom")
+	_ = c.Close(t.Context())
+	got := dl.all()
+	if len(got) != 1 || !errors.Is(got[0].err, ErrUnavailable) {
+		t.Fatalf("dead letters = %v, want one matching ErrUnavailable", got)
+	}
+	if _, ok := errors.AsType[*Error](got[0].err); !ok {
+		t.Errorf("err = %#v, want an *Error", got[0].err)
+	}
+}
+
 func TestServerDroppedEventsAreLogged(t *testing.T) {
 	l, log := newLogs()
 	events := &fakeEvents{res: &eventsv1.BatchCreateResponse{
 		Accepted: proto.Uint32(1), Dropped: proto.Uint32(2), DroppedByReason: map[string]uint32{"day_out_of_range": 2},
 	}}
-	if err := (eventSink{client: events, log: log}).send(t.Context(), []*eventsv1.Event{{}, {}, {}}); err != nil {
+	if err := (eventSink{client: events, log: log}).Send(t.Context(), []*eventsv1.Event{{}, {}, {}}); err != nil {
 		t.Fatal(err)
 	}
 	r := l.find(t, slog.LevelWarn, "server dropped events")
