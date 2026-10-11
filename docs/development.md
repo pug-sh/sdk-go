@@ -79,10 +79,9 @@ release tag (`vX.Y.Z`).
 
 | File                    | Responsibility                                                                  |
 | ----------------------- | ------------------------------------------------------------------------------- |
-| `client.go`             | `Client`, `Options`, `New`: ingestion (`Track`/`TrackWellKnown`/`Identify`) and lifecycle. |
+| `client.go`             | `Client`, `Options`, `New`: ingestion (`Track`/`TrackWellKnown`/`Identify`) and lifecycle; Connect clients with the `x-api-key` interceptor; the `BatchCreate` sink. |
 | `event.go`              | Builds and validates `Event` protos; maps Go values and typed schemas to `PropertyValue`; location. |
 | `batch.go`              | Batching transport: one sender goroutine, flush triggers, retry, dead-letter.   |
-| `rpc.go`                | Connect clients with the `x-api-key` interceptor; the `BatchCreate` sink.       |
 | `reads.go`              | `Profiles`/`Activity`/`Insights` read facades.                                  |
 | `wellknown.go`          | Well-known event catalog from the proto options.                                |
 | `options.go`            | `Properties`, `Traits`, per-call options, `Location`.                           |
