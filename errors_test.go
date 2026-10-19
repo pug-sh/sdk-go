@@ -43,6 +43,40 @@ func TestErrorWithoutAMessage(t *testing.T) {
 	}
 }
 
+func TestErrorIsTheSentinelForItsCode(t *testing.T) {
+	for code, sentinel := range map[connect.Code]error{
+		connect.CodeCanceled:           ErrCanceled,
+		connect.CodeUnknown:            ErrUnknown,
+		connect.CodeInvalidArgument:    ErrInvalidArgument,
+		connect.CodeDeadlineExceeded:   ErrDeadlineExceeded,
+		connect.CodeNotFound:           ErrNotFound,
+		connect.CodeAlreadyExists:      ErrAlreadyExists,
+		connect.CodePermissionDenied:   ErrPermissionDenied,
+		connect.CodeResourceExhausted:  ErrResourceExhausted,
+		connect.CodeFailedPrecondition: ErrFailedPrecondition,
+		connect.CodeAborted:            ErrAborted,
+		connect.CodeOutOfRange:         ErrOutOfRange,
+		connect.CodeUnimplemented:      ErrUnimplemented,
+		connect.CodeInternal:           ErrInternal,
+		connect.CodeUnavailable:        ErrUnavailable,
+		connect.CodeDataLoss:           ErrDataLoss,
+		connect.CodeUnauthenticated:    ErrUnauthenticated,
+	} {
+		if err := toError(connect.NewError(code, errors.New("x"))); !errors.Is(err, sentinel) {
+			t.Errorf("errors.Is(%v, %v) = false", err, sentinel)
+		}
+	}
+	err := toError(connect.NewError(connect.CodeNotFound, errors.New("no such profile")))
+	for _, target := range []error{ErrUnavailable, &Error{Code: connect.CodeNotFound, Message: "no such profile"}, (*Error)(nil)} {
+		if errors.Is(err, target) {
+			t.Errorf("errors.Is(%v, %v) = true", err, target)
+		}
+	}
+	if generic := toError(errors.New("kaboom")); errors.Is(generic, ErrUnknown) {
+		t.Error("a failure outside the RPC layer matched ErrUnknown")
+	}
+}
+
 func TestErrorUnwrapsToTheContextError(t *testing.T) {
 	err := toError(connect.NewError(connect.CodeCanceled, context.Canceled))
 	if !errors.Is(err, context.Canceled) {

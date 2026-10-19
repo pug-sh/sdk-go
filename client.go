@@ -64,8 +64,9 @@ type BatchConfig struct {
 	MaxQueueSize int
 }
 
-// OnError is a dead-letter hook for buffered events that could not be delivered. It runs on
-// the goroutine that called Track or on the background sender, so it must be safe for
+// OnError is a dead-letter hook for buffered events that could not be delivered. err matches
+// [ErrQueueOverflow] or [ErrClosed] under [errors.Is], or is an [*Error] for a failed send. It
+// runs on the goroutine that called Track or on the background sender, so it must be safe for
 // concurrent use, return promptly, and not call Flush or Close.
 type OnError func(err error, events []*Event)
 
@@ -138,25 +139,27 @@ func newClient(rpc rpcClients, opts Options, sessionID string) *Client {
 // Track enqueues an event of kind for distinctID and returns at once; a background goroutine
 // sends events in batches. It never fails: invalid input is logged and dropped.
 //
-// For a well-known kind such as "purchase", props are checked against the event's schema,
-// keyed by the fields' JSON names ("productId"), and other keys ride along as custom
-// properties. Any other kind is a custom event with free-form props. [Client.TrackWellKnown]
-// takes the typed schema instead.
-func (c *Client) Track(distinctID, kind string, props Properties, opts ...TrackOption) {
+// The event's [Properties], if any, go among opts. For a well-known kind such as "purchase",
+// they are checked against the event's schema, keyed by the fields' JSON names ("productId";
+// "product_id" logs a warning), and other keys ride along as custom properties. Any other kind
+// is a custom event with free-form properties. [Client.TrackWellKnown] takes the typed schema
+// instead.
+func (c *Client) Track(distinctID, kind string, opts ...TrackOption) {
 	defer c.recoverPanic("Track", "kind", kind)
 	if !c.accept(distinctID, kind) {
 		return
 	}
-	if ev := toEvent(c.log, kind, c.sessionID, distinctID, props, trackOpts(opts)); ev != nil {
+	if ev := toEvent(c.log, kind, c.sessionID, distinctID, trackOpts(opts)); ev != nil {
 		c.queue.enqueue(ev)
 	}
 }
 
 // TrackWellKnown enqueues a well-known event from its typed properties message, such as
-// &commoneventsv1.PurchaseProperties{...}; the kind comes from the message's schema. extras
-// are sent as custom properties alongside the typed fields, except one named like a typed
-// field, which is dropped. Like Track, it never fails: invalid input is logged and dropped.
-func (c *Client) TrackWellKnown(distinctID string, event proto.Message, extras Properties, opts ...TrackOption) {
+// &commoneventsv1.PurchaseProperties{...}; the kind comes from the message's schema.
+// [Properties] among opts are sent as custom properties alongside the typed fields, except one
+// keyed by a typed field's JSON name, which is dropped. Like Track, it never fails: invalid
+// input is logged and dropped.
+func (c *Client) TrackWellKnown(distinctID string, event proto.Message, opts ...TrackOption) {
 	defer c.recoverPanic("TrackWellKnown", "message", fmt.Sprintf("%T", event))
 	if event == nil {
 		c.log.error("TrackWellKnown requires an event message")
@@ -171,7 +174,7 @@ func (c *Client) TrackWellKnown(distinctID string, event proto.Message, extras P
 	if !c.accept(distinctID, kind) {
 		return
 	}
-	if ev := toWellKnownEvent(c.log, kind, c.sessionID, distinctID, msg, extras, trackOpts(opts)); ev != nil {
+	if ev := toWellKnownEvent(c.log, kind, c.sessionID, distinctID, msg, trackOpts(opts)); ev != nil {
 		c.queue.enqueue(ev)
 	}
 }
@@ -195,10 +198,10 @@ func (c *Client) accept(distinctID, kind string) bool {
 	return false
 }
 
-// Identify creates or updates the profile for externalID, shallow-merging traits into its
-// stored properties. It blocks until the server answers. It never fails: invalid input and
-// request failures are logged.
-func (c *Client) Identify(ctx context.Context, externalID string, traits Traits, opts ...IdentifyOption) {
+// Identify creates or updates the profile for externalID, shallow-merging the [Traits] among
+// opts into its stored properties. It blocks until the server answers. It never fails: invalid
+// input and request failures are logged.
+func (c *Client) Identify(ctx context.Context, externalID string, opts ...IdentifyOption) {
 	defer c.recoverPanic("Identify")
 	if c.closed.Load() {
 		c.log.warn("Identify called after Close; dropped")
@@ -210,9 +213,10 @@ func (c *Client) Identify(ctx context.Context, externalID string, traits Traits,
 	}
 	var o identifyOptions
 	for _, opt := range opts {
-		if opt != nil {
-			opt(&o)
+		if t, ok := opt.(*Traits); opt == nil || ok && t == nil {
+			continue
 		}
+		opt.applyIdentify(&o)
 	}
 	if !utf8.ValidString(externalID) || !utf8.ValidString(o.anonymousID) || !utf8.ValidString(o.deviceID) {
 		c.log.error("Identify ids must be valid UTF-8")
@@ -225,8 +229,8 @@ func (c *Client) Identify(ctx context.Context, externalID string, traits Traits,
 	if o.deviceID != "" {
 		req.DeviceId = proto.String(o.deviceID)
 	}
-	if traits != nil {
-		s, err := toStruct(traits)
+	if o.traits != nil {
+		s, err := toStruct(o.traits)
 		if err != nil {
 			c.log.error("Identify traits must be JSON-serializable", "err", err)
 			return

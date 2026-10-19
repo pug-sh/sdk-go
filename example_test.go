@@ -24,7 +24,7 @@ func Example() {
 	ctx := context.Background()
 
 	client.Track("user_42", "order.completed", pug.Properties{"amount": 49.0, "currency": "USD"})
-	client.TrackWellKnown("user_42", &commoneventsv1.FeatureUsedProperties{FeatureId: proto.String("export")}, nil)
+	client.TrackWellKnown("user_42", &commoneventsv1.FeatureUsedProperties{FeatureId: proto.String("export")})
 	client.Identify(ctx, "user_42", pug.Traits{"email": "ada@example.com", "plan": "pro"})
 
 	profile, err := client.Profiles.GetByExternalID(ctx, "user_42")

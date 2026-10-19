@@ -229,7 +229,7 @@ func (b *batcher) flushOnce() {
 			continue
 		case isPermanent(err):
 			b.log.error("permanent send failure; events dropped", "events", len(chunk), "err", err)
-			b.deadLetter(err, chunk)
+			b.deadLetter(toError(err), chunk)
 			continue
 		}
 		b.mu.Lock()
@@ -237,7 +237,7 @@ func (b *batcher) flushOnce() {
 		b.mu.Unlock()
 		if closed {
 			b.log.error("client closed; events dropped after a transient send failure", "events", len(chunk), "err", err)
-			b.deadLetter(err, chunk)
+			b.deadLetter(toError(err), chunk)
 			b.requeue(slices.Concat(chunks[i+1:]...), false)
 		} else {
 			b.log.warn("transient send failure; will retry", "events", len(chunk), "err", err)
@@ -267,7 +267,7 @@ func (b *batcher) split(batch []*eventsv1.Event) [][]*eventsv1.Event {
 func (b *batcher) sendChunk(chunk []*eventsv1.Event) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("pug: sending batch panicked: %v", r)
+			err = &Error{Message: fmt.Sprintf("sending batch panicked: %v", r)}
 		}
 	}()
 	ctx, cancel := context.WithTimeout(b.sendCtx, b.timeout)

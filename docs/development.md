@@ -4,13 +4,13 @@ Internal guide for working on `sdk-go`. End-user docs live in the [README](../RE
 
 ## Toolchain
 
-- **[Go](https://go.dev/dl/)** 1.26 or newer — builds, tests, and runs the protobuf generators
+- **[Go](https://go.dev/dl/)** 1.26 or newer: builds, tests, and runs the protobuf generators
   (`protoc-gen-go` and `protoc-gen-connect-go` are `tool` dependencies in `go.mod`, run through
   `go tool`).
-- **[golangci-lint](https://golangci-lint.run)** v2 — lint and import formatting (see
+- **[golangci-lint](https://golangci-lint.run)** v2: lint and import formatting (see
   `.golangci.yml`). It must be built with a Go at least as new as the one whose standard
   library it loads.
-- **[buf](https://buf.build/docs/installation)** — re-vendor and regenerate the protobuf code.
+- **[buf](https://buf.build/docs/installation)**: re-vendor and regenerate the protobuf code.
   Only needed when updating protos.
 
 ## Protobuf types (vendored)
@@ -18,7 +18,7 @@ Internal guide for working on `sdk-go`. End-user docs live in the [README](../RE
 Protobuf types are **vendored**, not pulled from a Buf Schema Registry Go module: the generated
 code is committed under `gen/` and imported by the SDK and its users, so `go get` needs nothing
 but the Go module proxy. The `.proto` sources are mirrored under `proto/` from a **pinned** BSR
-commit — the same commit and allowlist as sdk-node. See the `Makefile`:
+commit, the same commit and allowlist as sdk-node. See the `Makefile`:
 
 | Command             | What it does                                                                                                                           |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -28,7 +28,7 @@ commit — the same commit and allowlist as sdk-node. See the `Makefile`:
 
 To take a newer schema: run `make proto-latest`, set `PROTO_COMMIT` in the `Makefile`, then
 `make sync-protos && make protos`, run the tests, and review + commit the `proto/` and `gen/`
-diff. Builds and CI never touch the BSR — they compile the committed snapshot, and CI fails if a
+diff. Builds and CI never touch the BSR: they compile the committed snapshot, and CI fails if a
 fresh `make protos` differs from it.
 
 `buf.gen.yaml` keeps the upstream Go package names (`eventsv1`, `commoneventsv1`,
@@ -70,7 +70,7 @@ with protovalidate; unknown kinds map their properties by Go type.
 | `make fmt`     | `golangci-lint fmt` (goimports, `gen/` excluded)                    |
 | `make vuln`    | `govulncheck ./...`                                                 |
 | `make check`   | `lint`, `test`, `build`                                             |
-| `make ci`      | `protos`, `check-codegen`, then `check` — what CI runs              |
+| `make ci`      | `protos`, `check-codegen`, then `check` (what CI runs)              |
 
 `Version` in `version.go` is sent with every event as `$sdkVersion`. Bump it together with the
 release tag (`vX.Y.Z`).
@@ -79,14 +79,14 @@ release tag (`vX.Y.Z`).
 
 | File                    | Responsibility                                                                  |
 | ----------------------- | ------------------------------------------------------------------------------- |
-| `client.go`             | `Client`, `Options`, `New` — ingestion (`Track`/`TrackWellKnown`/`Identify`) and lifecycle. |
+| `client.go`             | `Client`, `Options`, `New`: ingestion (`Track`/`TrackWellKnown`/`Identify`) and lifecycle. |
 | `event.go`              | Builds and validates `Event` protos; maps Go values and typed schemas to `PropertyValue`; location. |
 | `batch.go`              | Batching transport: one sender goroutine, flush triggers, retry, dead-letter.   |
 | `rpc.go`                | Connect clients with the `x-api-key` interceptor; the `BatchCreate` sink.       |
 | `reads.go`              | `Profiles`/`Activity`/`Insights` read facades.                                  |
 | `wellknown.go`          | Well-known event catalog from the proto options.                                |
 | `options.go`            | `Properties`, `Traits`, per-call options, `Location`.                           |
-| `errors.go`             | `Error` and its normalization from Connect errors.                              |
+| `errors.go`             | `Error`, its per-code sentinels, and its normalization from Connect errors.     |
 | `countries.go`          | ISO 3166-1 alpha-2 set, mirroring the server's `internal/geo`.                  |
 | `log.go`, `version.go`  | `slog` wrapper; SDK version.                                                    |
 
@@ -110,6 +110,16 @@ The contract matches sdk-node; these are the places the Go port deliberately dif
   strings and keys are repaired with U+FFFD and a non-UTF-8 `distinctID` is rejected.
 - **Types over heuristics.** A Go `float64` is always a double and an integer always an int;
   the whole-number-is-int rule exists in sdk-node only because JavaScript has one number type.
+- **Properties are options.** Go has no optional parameters and only a final variadic one, so
+  `Properties` and `Traits` implement `TrackOption` and `IdentifyOption`: optional like
+  sdk-node's `props?`, in any position, and merged when given more than once.
+- **Errors match by code.** `*Error` has an `Is` method and a sentinel per Connect code
+  (`ErrNotFound`, …), and `OnError` gets a failed send as an `*Error` where sdk-node passes the
+  raw `ConnectError`, so one `errors.Is` check works for reads and dead letters.
+- **Proto-name hint.** Well-known fields are keyed by JSON name, as in sdk-node, but a key that is
+  a field's proto name (`product_id`) also logs a did-you-mean warning, as in sdk-python, and
+  still goes out as a custom property. Unlike sdk-python, the warning comes before validation, so
+  it also shows when the slip leaves a required field unset and the event is dropped.
 
 ## Testing notes
 

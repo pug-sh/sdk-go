@@ -306,7 +306,7 @@ func TestE2EPermanentFailureDeadLetters(t *testing.T) {
 	srv := &pugServer{batchErrs: []error{connect.NewError(connect.CodeInvalidArgument, errors.New("bad batch"))}}
 	dl := &deadLetters{}
 	c, _ := startServer(t, srv, Options{OnError: dl.record})
-	c.Track("user_42", "my.custom", nil)
+	c.Track("user_42", "my.custom")
 	_ = c.Flush(t.Context())
 	if got := dl.all(); len(got) != 1 || connect.CodeOf(got[0].err) != connect.CodeInvalidArgument {
 		t.Errorf("dead letters = %v", got)
@@ -317,7 +317,7 @@ func TestE2ETransientFailureRetries(t *testing.T) {
 	srv := &pugServer{batchErrs: []error{connect.NewError(connect.CodeUnavailable, errors.New("down"))}}
 	dl := &deadLetters{}
 	c, _ := startServer(t, srv, Options{OnError: dl.record})
-	c.Track("user_42", "my.custom", nil)
+	c.Track("user_42", "my.custom")
 	_ = c.Flush(t.Context())
 	if len(srv.batches) != 0 {
 		t.Fatalf("server got %v", srv.batches)

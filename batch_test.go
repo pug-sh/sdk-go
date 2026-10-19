@@ -311,7 +311,7 @@ func TestBatchCloseDeadLettersTransientFailure(t *testing.T) {
 		if err := b.close(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		if got := dl.all(); len(got) != 1 || got[0].ids != "1" || !errors.Is(got[0].err, errUnavailable) {
+		if got := dl.all(); len(got) != 1 || got[0].ids != "1" || !errors.Is(got[0].err, ErrUnavailable) {
 			t.Errorf("dead letters = %v", got)
 		}
 		l.find(t, slog.LevelError, "client closed")
@@ -480,7 +480,7 @@ func TestBatchCloseWithExpiredContextReportsTheRest(t *testing.T) {
 			t.Fatalf("close = %v, want the deadline", err)
 		}
 		got := dl.all()
-		if len(got) != 2 || got[0].ids != "1,2" || connect.CodeOf(got[0].err) != connect.CodeCanceled ||
+		if len(got) != 2 || got[0].ids != "1,2" || !errors.Is(got[0].err, ErrCanceled) ||
 			got[1].ids != "3,4,5" || !errors.Is(got[1].err, ErrClosed) {
 			t.Errorf("dead letters = %v", got)
 		}
@@ -554,7 +554,7 @@ func TestBatchRecoversFromAPanickingSink(t *testing.T) {
 		defer b.close(t.Context())
 		b.enqueue(ev(1))
 		_ = b.flush(t.Context())
-		if got := dl.all(); len(got) != 1 || !strings.Contains(got[0].err.Error(), "sink boom") {
+		if got := dl.all(); len(got) != 1 || got[0].err.Error() != "pug: sending batch panicked: sink boom" {
 			t.Errorf("dead letters = %v", got)
 		}
 	})
