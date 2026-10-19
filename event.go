@@ -49,29 +49,30 @@ var (
 
 // toEvent builds and validates an Event from Track's arguments. It returns nil, having logged
 // why, when the event must be dropped.
-func toEvent(log logger, kind, sessionID, distinctID string, props Properties, o trackOptions) *eventsv1.Event {
-	custom := make(map[string]*commonv1.PropertyValue, len(props))
+func toEvent(log logger, kind, sessionID, distinctID string, o trackOptions) *eventsv1.Event {
+	custom := make(map[string]*commonv1.PropertyValue, len(o.props))
 	source := "custom"
 	if mt, ok := wellKnown().byKind[kind]; ok {
 		source = "well-known"
-		if !wellKnownProperties(log, kind, mt.New(), props, custom) {
+		if !wellKnownProperties(log, kind, mt.New(), o.props, custom) {
 			return nil
 		}
 	} else {
-		customProperties(log, kind, props, custom)
+		customProperties(log, kind, o.props, custom)
 	}
 	return newEvent(log, kind, sessionID, distinctID, source, custom, o)
 }
 
-func toWellKnownEvent(log logger, kind, sessionID, distinctID string, msg protoreflect.Message, extras Properties, o trackOptions) *eventsv1.Event {
+func toWellKnownEvent(log logger, kind, sessionID, distinctID string, msg protoreflect.Message, o trackOptions) *eventsv1.Event {
+	fields := msg.Descriptor().Fields()
+	hintProtoNames(log, kind, fields, o.props)
 	if !validProperties(log, kind, msg.Interface()) {
 		return nil
 	}
-	custom := make(map[string]*commonv1.PropertyValue, msg.Descriptor().Fields().Len()+len(extras))
+	custom := make(map[string]*commonv1.PropertyValue, fields.Len()+len(o.props))
 	knownProperties(log, msg, custom)
-	fields := msg.Descriptor().Fields()
-	rest := make(Properties, len(extras))
-	for k, v := range extras {
+	rest := make(Properties, len(o.props))
+	for k, v := range o.props {
 		if fields.ByJSONName(k) != nil {
 			log.warn("extra property shares a typed field's name; skipping", "kind", kind, "property", k)
 			continue
@@ -140,6 +141,7 @@ func validProperties(log logger, kind string, msg proto.Message) bool {
 func wellKnownProperties(log logger, kind string, msg protoreflect.Message, props Properties, out map[string]*commonv1.PropertyValue) bool {
 	md := msg.Descriptor()
 	fields := md.Fields()
+	hintProtoNames(log, kind, fields, props)
 	for i := range fields.Len() {
 		fd := fields.Get(i)
 		v, ok := props[fd.JSONName()]
@@ -168,6 +170,16 @@ func wellKnownProperties(log logger, kind string, msg protoreflect.Message, prop
 	}
 	customProperties(log, kind, extras, out)
 	return true
+}
+
+// Fields are keyed by JSON name, as in sdk-node. A key that is a proto name is most likely a
+// slip: it doesn't set the field, and goes out as an untyped custom property.
+func hintProtoNames(log logger, kind string, fields protoreflect.FieldDescriptors, props Properties) {
+	for k := range props {
+		if fd := fields.ByName(protoreflect.Name(k)); fd != nil && fd.JSONName() != k {
+			log.warn("property is not a field; did you mean its JSON name?", "kind", kind, "property", k, "json_name", fd.JSONName())
+		}
+	}
 }
 
 func knownProperties(log logger, msg protoreflect.Message, out map[string]*commonv1.PropertyValue) {

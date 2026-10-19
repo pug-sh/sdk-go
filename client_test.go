@@ -85,8 +85,8 @@ func TestTrackAfterCloseWarnsAndDrops(t *testing.T) {
 	dl := &deadLetters{}
 	c, l := newTestClient(t, rpcClients{events: events}, Options{OnError: dl.record})
 	_ = c.Close(t.Context())
-	c.Track("user_1", "my.custom", nil)
-	c.TrackWellKnown("user_1", &commoneventsv1.FeatureUsedProperties{FeatureId: proto.String("x")}, nil)
+	c.Track("user_1", "my.custom")
+	c.TrackWellKnown("user_1", &commoneventsv1.FeatureUsedProperties{FeatureId: proto.String("x")})
 	if n := len(l.warns()); n != 2 {
 		t.Errorf("got %d warnings, want 2: %v", n, l.records)
 	}
@@ -98,7 +98,7 @@ func TestTrackAfterCloseWarnsAndDrops(t *testing.T) {
 func TestTrackCarriesOptionsThroughToTheEvent(t *testing.T) {
 	events := &fakeEvents{}
 	c, _ := newTestClient(t, rpcClients{events: events}, Options{})
-	c.Track("user_1", "my.custom", nil, WithTimestamp(time.Unix(0, 0)), WithLocation(Location{Country: "DE"}))
+	c.Track("user_1", "my.custom", WithTimestamp(time.Unix(0, 0)), WithLocation(Location{Country: "DE"}))
 	if err := c.Flush(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -114,10 +114,31 @@ func TestTrackCarriesOptionsThroughToTheEvent(t *testing.T) {
 	}
 }
 
+func TestTrackTakesPropertiesAmongItsOptions(t *testing.T) {
+	events := &fakeEvents{}
+	c, _ := newTestClient(t, rpcClients{events: events}, Options{})
+	first := Properties{"plan": "free", "seats": 1}
+	c.Track("user_1", "my.custom")
+	c.Track("user_1", "my.custom", nil, (*Properties)(nil))
+	c.Track("user_1", "my.custom", WithSessionID(testSession), first, Properties{"plan": "pro"})
+	_ = c.Flush(t.Context())
+	sent := events.sent()
+	if len(sent) != 3 || len(sent[0].GetCustomProperties()) != 0 || len(sent[1].GetCustomProperties()) != 0 {
+		t.Fatalf("sent %v", sent)
+	}
+	cp := sent[2].GetCustomProperties()
+	if cp["plan"].GetStringValue() != "pro" || cp["seats"].GetIntValue() != 1 {
+		t.Errorf("custom properties = %v, want the maps merged, the later one winning", cp)
+	}
+	if first["plan"] != "free" {
+		t.Errorf("the caller's map was written to: %v", first)
+	}
+}
+
 func TestTrackContainsPanics(t *testing.T) {
 	events := &fakeEvents{}
 	c, l := newTestClient(t, rpcClients{events: events}, Options{})
-	c.Track("user_1", "my.custom", Properties{"ok": 1}, func(*trackOptions) { panic("option boom") })
+	c.Track("user_1", "my.custom", Properties{"ok": 1}, trackOption(func(*trackOptions) { panic("option boom") }))
 	r := l.find(t, slog.LevelError, "unexpected panic in Track")
 	if r.attrs["kind"] != "my.custom" || r.attrs["panic"] != "option boom" {
 		t.Errorf("log = %v", r)
@@ -169,7 +190,7 @@ func TestTrackWellKnownRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			events := &fakeEvents{}
 			c, l := newTestClient(t, rpcClients{events: events}, Options{})
-			c.TrackWellKnown("user_1", tc.event, nil)
+			c.TrackWellKnown("user_1", tc.event)
 			_ = c.Flush(t.Context())
 			l.find(t, slog.LevelError, tc.want)
 			if sent := events.sent(); len(sent) != 0 {
@@ -183,10 +204,17 @@ func TestOnErrorReceivesUndeliverableEvents(t *testing.T) {
 	events := &fakeEvents{err: connect.NewError(connect.CodeInvalidArgument, errors.New("bad batch"))}
 	dl := &deadLetters{}
 	c, _ := newTestClient(t, rpcClients{events: events}, Options{OnError: dl.record})
-	c.Track("user_1", "my.custom", nil)
+	c.Track("user_1", "my.custom")
 	_ = c.Flush(t.Context())
-	if got := dl.all(); len(got) != 1 || connect.CodeOf(got[0].err) != connect.CodeInvalidArgument {
-		t.Errorf("dead letters = %v", got)
+	got := dl.all()
+	if len(got) != 1 {
+		t.Fatalf("dead letters = %v", got)
+	}
+	if perr, ok := errors.AsType[*Error](got[0].err); !ok || perr.Message != "bad batch" || !errors.Is(got[0].err, ErrInvalidArgument) {
+		t.Errorf("err = %#v, want an *Error matching ErrInvalidArgument", got[0].err)
+	}
+	if connect.CodeOf(got[0].err) != connect.CodeInvalidArgument {
+		t.Errorf("connect.CodeOf = %v", connect.CodeOf(got[0].err))
 	}
 }
 
@@ -230,10 +258,19 @@ func TestIdentifySendsTheRequest(t *testing.T) {
 	}
 }
 
+func TestIdentifyMergesTraits(t *testing.T) {
+	sdk := &fakeProfilesSDK{}
+	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
+	c.Identify(t.Context(), "user_1", Traits{"plan": "free", "seats": 3}, WithDeviceID("device-1"), Traits{"plan": "pro"})
+	if traits := sdk.calls()[0].GetTraits().AsMap(); traits["plan"] != "pro" || traits["seats"] != float64(3) {
+		t.Errorf("traits = %v", traits)
+	}
+}
+
 func TestIdentifyOmitsUnsetFields(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-	c.Identify(t.Context(), "user_1", nil, WithAnonymousID(""))
+	c.Identify(t.Context(), "user_1", nil, Traits(nil), (*Traits)(nil), WithAnonymousID(""))
 	req := sdk.calls()[0]
 	if req.Traits != nil || req.AnonymousId != nil || req.DeviceId != nil {
 		t.Errorf("request = %v", req)
@@ -244,22 +281,21 @@ func TestIdentifyRefusesBadInputWithoutDialing(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		externalID string
-		traits     Traits
 		opts       []IdentifyOption
 		want       string
 	}{
-		{"empty external id", "", nil, nil, "non-empty externalID"},
-		{"anonymous id without anon-", "user_1", nil, []IdentifyOption{WithAnonymousID("nope")}, "invalid identify request"},
-		{"reserved prefix", "cookieless-abc", nil, nil, "invalid identify request"},
-		{"long device id", "user_1", nil, []IdentifyOption{WithDeviceID(strings.Repeat("d", 37))}, "invalid identify request"},
-		{"invalid UTF-8", "user\xff", nil, nil, "valid UTF-8"},
-		{"NaN trait", "user_1", Traits{"score": math.NaN()}, nil, "JSON-serializable"},
-		{"func trait", "user_1", Traits{"f": func() {}}, nil, "JSON-serializable"},
+		{"empty external id", "", nil, "non-empty externalID"},
+		{"anonymous id without anon-", "user_1", []IdentifyOption{WithAnonymousID("nope")}, "invalid identify request"},
+		{"reserved prefix", "cookieless-abc", nil, "invalid identify request"},
+		{"long device id", "user_1", []IdentifyOption{WithDeviceID(strings.Repeat("d", 37))}, "invalid identify request"},
+		{"invalid UTF-8", "user\xff", nil, "valid UTF-8"},
+		{"NaN trait", "user_1", []IdentifyOption{Traits{"score": math.NaN()}}, "JSON-serializable"},
+		{"func trait", "user_1", []IdentifyOption{Traits{"f": func() {}}}, "JSON-serializable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sdk := &fakeProfilesSDK{}
 			c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-			c.Identify(t.Context(), tc.externalID, tc.traits, tc.opts...)
+			c.Identify(t.Context(), tc.externalID, tc.opts...)
 			l.find(t, slog.LevelError, tc.want)
 			if n := len(sdk.calls()); n != 0 {
 				t.Errorf("dialed %d times", n)
@@ -270,7 +306,7 @@ func TestIdentifyRefusesBadInputWithoutDialing(t *testing.T) {
 
 func TestIdentifyNamesTheReservedPrefix(t *testing.T) {
 	c, l := newTestClient(t, rpcClients{}, Options{})
-	c.Identify(t.Context(), "cookieless-abc", nil)
+	c.Identify(t.Context(), "cookieless-abc")
 	if got := l.find(t, slog.LevelError, "invalid identify request").attrs["violations"].(string); !strings.Contains(got, "reserved 'cookieless-' prefix") {
 		t.Errorf("violations = %q", got)
 	}
@@ -279,7 +315,7 @@ func TestIdentifyNamesTheReservedPrefix(t *testing.T) {
 func TestIdentifyLogsFailures(t *testing.T) {
 	sdk := &fakeProfilesSDK{err: connect.NewError(connect.CodeUnavailable, errors.New("down"))}
 	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-	c.Identify(t.Context(), "user_1", nil)
+	c.Identify(t.Context(), "user_1")
 	if r := l.find(t, slog.LevelError, "identify failed"); r.attrs["external_id"] != "user_1" {
 		t.Errorf("log = %v", r)
 	}
@@ -289,7 +325,7 @@ func TestIdentifyAfterCloseWarns(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
 	_ = c.Close(t.Context())
-	c.Identify(t.Context(), "user_1", nil)
+	c.Identify(t.Context(), "user_1")
 	l.find(t, slog.LevelWarn, "Identify called after Close")
 	if n := len(sdk.calls()); n != 0 {
 		t.Errorf("dialed %d times", n)

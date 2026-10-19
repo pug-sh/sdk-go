@@ -7,7 +7,8 @@
 // can't take down a request path. [Client.Identify] logs its failures too.
 //
 // Reads ([Client.Profiles], [Client.Activity] and [Client.Insights]) run in the caller's
-// control flow: they return errors of type [*Error] and are never retried.
+// control flow: they return errors of type [*Error] and are never retried. [errors.Is] matches
+// an [*Error] to the sentinel for its status code, such as [ErrNotFound].
 //
 // Call [Client.Close] on shutdown so buffered events are not lost.
 package pug

@@ -24,15 +24,15 @@ import (
 	eventsv1 "github.com/pug-sh/sdk-go/gen/sdk/events/v1"
 )
 
-func track(t *testing.T, kind string, props Properties, opts ...TrackOption) (*eventsv1.Event, *logs) {
+func track(t *testing.T, kind string, opts ...TrackOption) (*eventsv1.Event, *logs) {
 	t.Helper()
 	l, log := newLogs()
-	return toEvent(log, kind, testSession, "user_1", props, trackOpts(opts)), l
+	return toEvent(log, kind, testSession, "user_1", trackOpts(opts)), l
 }
 
-func mustTrack(t *testing.T, kind string, props Properties, opts ...TrackOption) (*eventsv1.Event, *logs) {
+func mustTrack(t *testing.T, kind string, opts ...TrackOption) (*eventsv1.Event, *logs) {
 	t.Helper()
-	ev, l := track(t, kind, props, opts...)
+	ev, l := track(t, kind, opts...)
 	if ev == nil {
 		t.Fatalf("event dropped; logs: %v", l.records)
 	}
@@ -87,7 +87,7 @@ func TestCustomEventMapsPropertyTypes(t *testing.T) {
 }
 
 func TestEventCarriesSDKAutoProperties(t *testing.T) {
-	ev, _ := mustTrack(t, "my.custom", nil)
+	ev, _ := mustTrack(t, "my.custom")
 	ap := ev.GetAutoProperties()
 	if got := keys(ap); !slices.Equal(got, []string{"$lib", "$platform", "$sdkVersion"}) {
 		t.Fatalf("auto properties = %v", got)
@@ -98,7 +98,7 @@ func TestEventCarriesSDKAutoProperties(t *testing.T) {
 }
 
 func TestEventFailingValidationIsDropped(t *testing.T) {
-	ev, l := track(t, "my.custom", nil, WithSessionID("not-a-uuid"))
+	ev, l := track(t, "my.custom", WithSessionID("not-a-uuid"))
 	if ev != nil {
 		t.Fatal("want the event dropped")
 	}
@@ -109,7 +109,7 @@ func TestEventFailingValidationIsDropped(t *testing.T) {
 }
 
 func TestEmptySessionIDKeepsTheDefault(t *testing.T) {
-	ev, _ := mustTrack(t, "my.custom", nil, WithSessionID(""))
+	ev, _ := mustTrack(t, "my.custom", WithSessionID(""))
 	if ev.GetSessionId() != testSession {
 		t.Errorf("session = %q", ev.GetSessionId())
 	}
@@ -122,7 +122,7 @@ func TestDollarPrefixedCustomKeyDropsTheEvent(t *testing.T) {
 }
 
 func TestKindOutsideTheCharsetDropsTheEvent(t *testing.T) {
-	if ev, _ := track(t, "order completed", nil); ev != nil {
+	if ev, _ := track(t, "order completed"); ev != nil {
 		t.Fatal("want the event dropped")
 	}
 }
@@ -279,6 +279,33 @@ func TestWellKnownExtrasAndUnsetFields(t *testing.T) {
 	cp := ev.GetCustomProperties()
 	if got := keys(cp); !slices.Equal(got, []string{"amount", "currency", "product_id", "referrer"}) {
 		t.Errorf("custom properties = %v", got)
+	}
+}
+
+func TestWellKnownProtoNameGetsAHint(t *testing.T) {
+	ev, l := mustTrack(t, "purchase", Properties{"amount": 5, "product_id": "p1"})
+	if strOf(t, ev.GetCustomProperties()["product_id"]) != "p1" {
+		t.Errorf("custom properties = %v", ev.GetCustomProperties())
+	}
+	if w := l.warns(); len(w) != 1 || w[0].attrs["property"] != "product_id" || w[0].attrs["json_name"] != "productId" {
+		t.Errorf("warnings = %v", w)
+	}
+
+	ev, l = track(t, "feature_used", Properties{"feature_id": "export"})
+	if ev != nil {
+		t.Fatal("want the event dropped")
+	}
+	if r := l.find(t, slog.LevelWarn, "did you mean"); r.attrs["json_name"] != "featureId" {
+		t.Errorf("log = %v", r)
+	}
+
+	l, log := newLogs()
+	refund := &commoneventsv1.OrderRefundedProperties{Amount: proto.Float64(5)}
+	if toWellKnownEvent(log, "order_refunded", testSession, "user_1", refund.ProtoReflect(), trackOptions{props: Properties{"order_id": "o1"}}) != nil {
+		t.Fatal("want the typed event dropped")
+	}
+	if r := l.find(t, slog.LevelWarn, "did you mean"); r.attrs["json_name"] != "orderId" {
+		t.Errorf("log = %v", r)
 	}
 }
 
@@ -452,10 +479,10 @@ func TestTypedEventMatchesTheUntypedOne(t *testing.T) {
 		FromPosition: durationpb.New(5 * time.Second),
 		ToPosition:   durationpb.New(9500 * time.Millisecond),
 	}
-	typed := toWellKnownEvent(log, "video_seeked", testSession, "user_1", msg.ProtoReflect(), Properties{"source": "scrubber"}, trackOptions{})
-	untyped := toEvent(log, "video_seeked", testSession, "user_1", Properties{
+	typed := toWellKnownEvent(log, "video_seeked", testSession, "user_1", msg.ProtoReflect(), trackOptions{props: Properties{"source": "scrubber"}})
+	untyped := toEvent(log, "video_seeked", testSession, "user_1", trackOptions{props: Properties{
 		"videoId": "v1", "fromPosition": 5 * time.Second, "toPosition": 9500 * time.Millisecond, "source": "scrubber",
-	}, trackOptions{})
+	}})
 	if typed == nil || untyped == nil {
 		t.Fatal("event dropped")
 	}
@@ -465,15 +492,15 @@ func TestTypedEventMatchesTheUntypedOne(t *testing.T) {
 }
 
 func TestOccurTime(t *testing.T) {
-	ev, _ := mustTrack(t, "my.custom", nil, WithTimestamp(time.UnixMilli(1_700_000_000_000)))
+	ev, _ := mustTrack(t, "my.custom", WithTimestamp(time.UnixMilli(1_700_000_000_000)))
 	if got := ev.GetOccurTime().GetSeconds(); got != 1_700_000_000 {
 		t.Errorf("occur time = %d", got)
 	}
-	ev, _ = mustTrack(t, "my.custom", nil, WithTimestamp(time.Unix(0, 0)))
+	ev, _ = mustTrack(t, "my.custom", WithTimestamp(time.Unix(0, 0)))
 	if got := ev.GetOccurTime().AsTime(); !got.Equal(time.Unix(0, 0)) {
 		t.Errorf("occur time = %v, want the epoch", got)
 	}
-	ev, _ = mustTrack(t, "my.custom", nil, WithTimestamp(time.UnixMilli(1_700_000_000_000).Add(1234*time.Microsecond)))
+	ev, _ = mustTrack(t, "my.custom", WithTimestamp(time.UnixMilli(1_700_000_000_000).Add(1234*time.Microsecond)))
 	if got := ev.GetOccurTime().GetNanos(); got != 1_234_000 {
 		t.Errorf("occur nanos = %d", got)
 	}
@@ -482,7 +509,7 @@ func TestOccurTime(t *testing.T) {
 func TestOutOfRangeTimestampFallsBackToNow(t *testing.T) {
 	for _, ts := range []time.Time{{}, time.Unix(-1, 0), time.Unix(1_700_000_000_000, 0)} {
 		before := time.Now().Add(-time.Second)
-		ev, l := mustTrack(t, "my.custom", nil, WithTimestamp(ts))
+		ev, l := mustTrack(t, "my.custom", WithTimestamp(ts))
 		if got := ev.GetOccurTime().AsTime(); got.Before(before) || got.After(time.Now().Add(time.Second)) {
 			t.Errorf("%v: occur time = %v, want now", ts, got)
 		}
@@ -492,7 +519,7 @@ func TestOutOfRangeTimestampFallsBackToNow(t *testing.T) {
 
 func location(t *testing.T, loc Location) (*eventsv1.Event, *logs) {
 	t.Helper()
-	return mustTrack(t, "my.custom", nil, WithLocation(loc))
+	return mustTrack(t, "my.custom", WithLocation(loc))
 }
 
 func TestLocationRendersEveryField(t *testing.T) {
@@ -584,7 +611,7 @@ func TestLocationWithNoUsableFieldWarns(t *testing.T) {
 }
 
 func TestNoLocationWritesNoGeo(t *testing.T) {
-	ev, l := mustTrack(t, "my.custom", nil)
+	ev, l := mustTrack(t, "my.custom")
 	if got := keys(ev.GetAutoProperties()); !slices.Equal(got, []string{"$lib", "$platform", "$sdkVersion"}) {
 		t.Errorf("auto properties = %v", got)
 	}

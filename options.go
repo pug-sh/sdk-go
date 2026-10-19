@@ -1,27 +1,53 @@
 package pug
 
 import (
+	"maps"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 )
 
-// Properties are an event's custom properties. Strings, booleans, integers and floats keep
-// their type; time.Time becomes a timestamp and time.Duration a duration string like "1.5s";
-// json.Number is an integer when it has no fraction; a value implementing
-// encoding.TextMarshaler is sent as its text; other maps, slices and structs are sent as JSON
-// strings. Nil values are omitted, and a value that can't be represented (a func, NaN, a
-// uint64 past the int64 range) is dropped with a warning.
+// Properties are an event's custom properties, passed to [Client.Track] or
+// [Client.TrackWellKnown] among its options; given more than once, they are merged, later keys
+// winning. Strings, booleans, integers and floats keep their type; time.Time becomes a
+// timestamp and time.Duration a duration string like "1.5s"; json.Number is an integer when it
+// has no fraction; a value implementing encoding.TextMarshaler is sent as its text; other maps,
+// slices and structs are sent as JSON strings. Nil values are omitted, and a value that can't
+// be represented (a func, NaN, a uint64 past the int64 range) is dropped with a warning.
 type Properties map[string]any
 
-// Traits are profile properties for [Client.Identify], shallow-merged into the stored ones.
-// They must be JSON-serializable.
+func (p Properties) applyTrack(o *trackOptions) { o.props = merge(o.props, p) }
+
+// Traits are profile properties, passed to [Client.Identify] among its options and
+// shallow-merged into the stored ones; given more than once, they are merged, later keys
+// winning. They must be JSON-serializable.
 type Traits map[string]any
 
-// TrackOption customizes one tracked event.
-type TrackOption func(*trackOptions)
+func (t Traits) applyIdentify(o *identifyOptions) { o.traits = merge(o.traits, t) }
+
+// The caller's maps are only read, never written, so a lone map is used as is.
+func merge[M ~map[string]any](dst, src M) M {
+	switch {
+	case src == nil:
+		return dst
+	case dst == nil:
+		return src
+	}
+	out := maps.Clone(dst)
+	maps.Copy(out, src)
+	return out
+}
+
+// TrackOption customizes one tracked event: its [Properties], or an option such as
+// [WithTimestamp].
+type TrackOption interface{ applyTrack(o *trackOptions) }
+
+type trackOption func(*trackOptions)
+
+func (f trackOption) applyTrack(o *trackOptions) { f(o) }
 
 type trackOptions struct {
+	props        Properties
 	timestamp    time.Time
 	hasTimestamp bool
 	sessionID    string
@@ -31,9 +57,11 @@ type trackOptions struct {
 func trackOpts(opts []TrackOption) trackOptions {
 	var o trackOptions
 	for _, opt := range opts {
-		if opt != nil {
-			opt(&o)
+		// A nil *Properties is a TrackOption through Properties' method, but calling it panics.
+		if p, ok := opt.(*Properties); opt == nil || ok && p == nil {
+			continue
 		}
+		opt.applyTrack(&o)
 	}
 	return o
 }
@@ -42,19 +70,19 @@ func trackOpts(opts []TrackOption) trackOptions {
 // epoch or after year 9999 is almost certainly a unit mistake, so it is ignored with a
 // warning.
 func WithTimestamp(t time.Time) TrackOption {
-	return func(o *trackOptions) { o.timestamp, o.hasTimestamp = t, true }
+	return trackOption(func(o *trackOptions) { o.timestamp, o.hasTimestamp = t, true })
 }
 
 // WithSessionID overrides the client's per-instance session id. It must be a UUID; an empty
 // id keeps the default.
 func WithSessionID(id string) TrackOption {
-	return func(o *trackOptions) { o.sessionID = id }
+	return trackOption(func(o *trackOptions) { o.sessionID = id })
 }
 
 // WithLocation records the visitor's location. Pug derives geo only from browser requests, so
 // an event sent with a private key carries the location set here or none at all.
 func WithLocation(loc Location) TrackOption {
-	return func(o *trackOptions) { o.location = &loc }
+	return trackOption(func(o *trackOptions) { o.location = &loc })
 }
 
 // Location is where the visitor is, for an event your backend sends on their behalf. Strings
@@ -81,10 +109,16 @@ type Coordinates struct {
 	Longitude float64
 }
 
-// IdentifyOption customizes a [Client.Identify] call.
-type IdentifyOption func(*identifyOptions)
+// IdentifyOption customizes a [Client.Identify] call: the profile's [Traits], or an option
+// such as [WithAnonymousID].
+type IdentifyOption interface{ applyIdentify(o *identifyOptions) }
+
+type identifyOption func(*identifyOptions)
+
+func (f identifyOption) applyIdentify(o *identifyOptions) { f(o) }
 
 type identifyOptions struct {
+	traits      Traits
 	anonymousID string
 	deviceID    string
 }
@@ -92,12 +126,12 @@ type identifyOptions struct {
 // WithAnonymousID names the SDK anonymous id (it must start with "anon-") whose profile is
 // merged into the identified one.
 func WithAnonymousID(id string) IdentifyOption {
-	return func(o *identifyOptions) { o.anonymousID = id }
+	return identifyOption(func(o *identifyOptions) { o.anonymousID = id })
 }
 
 // WithDeviceID assigns a device to the profile.
 func WithDeviceID(id string) IdentifyOption {
-	return func(o *identifyOptions) { o.deviceID = id }
+	return identifyOption(func(o *identifyOptions) { o.deviceID = id })
 }
 
 // GetOption customizes a single-profile lookup.
