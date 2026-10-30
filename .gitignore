@@ -11,3 +11,6 @@ coverage.*
 # Local secrets
 .env
 .env.*
+
+# Local design docs
+docs/superpowers/
