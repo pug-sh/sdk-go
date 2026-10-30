@@ -37,15 +37,17 @@ if err != nil {
 ctx := context.Background()
 
 // Track an event. distinctID (who the event is for) comes first: a server has no ambient user.
-client.Track("user_42", "order.completed", pug.Properties{"amount": 49.0, "currency": "USD"})
+// Properties are typed fields, in the same list as the options.
+client.Track("user_42", "order.completed", pug.Float("amount", 49.0), pug.String("currency", "USD"))
 
 // Well-known events get their properties validated against the event's schema...
-client.Track("user_42", "feature_used", pug.Properties{"featureId": "export"})
+client.Track("user_42", "feature_used", pug.String("featureId", "export"))
 // ...or take the typed schema itself, so the fields are checked at compile time.
 client.TrackWellKnown("user_42", &commoneventsv1.FeatureUsedProperties{FeatureId: proto.String("export")})
 
-// Identify a profile (never fails; problems are logged).
-client.Identify(ctx, "user_42", pug.Traits{"email": "ada@example.com", "plan": "pro"})
+// Identify a profile. Like Track, it returns at once and never fails; identifies are queued and
+// sent in batches.
+client.Identify("user_42", pug.Email("ada@example.com"), pug.String("plan", "pro"))
 
 // Reads return *pug.Error, which errors.Is matches to a sentinel per status code.
 profile, err := client.Profiles.GetByExternalID(ctx, "user_42")
@@ -60,20 +62,20 @@ for p, err := range client.Profiles.List(ctx, nil) {
 }
 trend, err := client.Insights.Query(ctx, &insightsv1.QueryRequest{ /* spec, time range, granularity */ })
 
-// Drain on shutdown so no buffered events are lost.
+// Drain on shutdown so no queued events or identifies are lost.
 err = client.Close(ctx)
 ```
 
 ## Behaviour
 
 - **Ingestion never fails.** `Track`, `TrackWellKnown` and `Identify` validate input client-side,
-  log and drop anything invalid, and return nothing. `Track` is non-blocking: a background
-  goroutine sends events in batches by size (`MaxSize`) or interval (`MaxWait`).
+  log and drop anything invalid, and return nothing. They are non-blocking: background
+  goroutines send events and identifies in batches by size (`MaxSize`) or interval (`MaxWait`).
+  Identifies go out with `BatchIdentify`; a server that predates it gets one `Identify` call each.
 - **Delivery is best-effort with retry.** A transient send failure keeps events queued and
   retries after `MaxWait`; a permanent one (a fixed set of client-error codes, plus any
   non-transport error) dead-letters them via `OnError`. `Close` drains and reports anything still
-  undelivered through `OnError`. `OnError` covers buffered events only; `Identify` failures are
-  logged.
+  undelivered through `OnError`, which covers both events and identifies.
 - **Reads are request/response and return errors** (`*pug.Error`): they run in your control
   flow, so you own retry. They are not auto-retried. Your `ctx` deadline bounds them; without
   one, `Timeout` (10s) does.
@@ -89,8 +91,8 @@ err = client.Close(ctx)
 | ------------ | ----------------- | ------------------ | ------------------------------------------------------------------------------------------------------- |
 | `APIKey`     | `string`          | none               | **Required.** Private project key (`prv_…`).                                                            |
 | `Endpoint`   | `string`          | hosted endpoint    | Pug server origin.                                                                                      |
-| `Batch`      | `pug.BatchConfig` | see below          | Ingestion buffer: `MaxSize` (100, capped at 1000), `MaxWait` (5s), `MaxQueueSize` (10,000).            |
-| `OnError`    | `pug.OnError`     | none               | Dead-letter hook for undeliverable buffered events (`Identify` failures are logged, not routed here).   |
+| `Batch`      | `pug.BatchConfig` | see below          | Ingestion buffers, one each for events and identifies: `MaxSize` (100, capped at 1000), `MaxWait` (5s), `MaxQueueSize` (10,000). |
+| `OnError`    | `pug.OnError`     | none               | Dead-letter hook for queued events and identifies that couldn't be delivered.                          |
 | `Logger`     | `*slog.Logger`    | `slog.Default()`   | Receives the SDK's warnings and errors.                                                                 |
 | `HTTPClient` | `*http.Client`    | default transport  | Sends the requests.                                                                                     |
 | `Timeout`    | `time.Duration`   | 10s                | Bounds each request whose context has no deadline.                                                      |
@@ -99,48 +101,75 @@ err = client.Close(ctx)
 pug.New(pug.Options{
 	APIKey: apiKey, // required, prv_…
 	Batch:  pug.BatchConfig{MaxSize: 100, MaxWait: 5 * time.Second, MaxQueueSize: 10_000},
-	OnError: func(err error, events []*pug.Event) {
-		// dead-letter sink; err matches pug.ErrQueueOverflow or pug.ErrClosed, or is a *pug.Error
-		// for a failed send, e.g. errors.Is(err, pug.ErrUnauthenticated)
+	OnError: func(err error, lost pug.Undelivered) {
+		// dead-letter sink for lost.Events and lost.Identifies; err matches pug.ErrQueueOverflow
+		// or pug.ErrClosed, or is a *pug.Error for a failed send, e.g. errors.Is(err, pug.ErrUnauthenticated)
 	},
 })
 ```
 
-`OnError` may run on the goroutine that called `Track` or on the background sender, so it must
-be safe for concurrent use, return promptly, and not call `Flush` or `Close`.
+`OnError` may run on the goroutine that called `Track` or `Identify` or on a background sender,
+so it must be safe for concurrent use, return promptly, and not call `Flush` or `Close`.
 
 ### Ingestion (never fails)
 
-- `client.Track(distinctID, kind, opts...)`: enqueue an event. Non-blocking.
+- `client.Track(distinctID, kind, opts...)`: enqueue an event; `opts` holds its property
+  fields, `Properties` maps and settings. Non-blocking.
 - `client.TrackWellKnown(distinctID, event, opts...)`: enqueue a well-known event from its typed
   message (e.g. `&commoneventsv1.PurchaseProperties{...}`); the kind comes from the schema, and
-  `pug.Properties` ride along as custom properties.
-- `client.Identify(ctx, externalID, opts...)`: create or update a profile.
-- `client.Flush(ctx)`: send the currently-buffered events now.
-- `client.Close(ctx)`: drain and shut down; call on graceful exit so nothing buffered is lost.
-  Events still undelivered when `ctx` ends are reported to `OnError`.
+  fields or `Properties` in `opts` ride along as custom properties.
+- `client.Identify(externalID, opts...)`: queue a create-or-update of a profile; `opts` holds its
+  trait fields, named traits, `Traits` maps and settings. Non-blocking.
+- `client.Flush(ctx)`: send the queued events and identifies now.
+- `client.Close(ctx)`: drain and shut down; call on graceful exit so nothing queued is lost.
+  Events and identifies still undelivered when `ctx` ends are reported to `OnError`.
 
-All options, `pug.Properties` and `pug.Traits` included, are optional and can go in any order;
-`pug.Properties` or `pug.Traits` given more than once are merged, later keys winning.
-`Track` options: `pug.Properties{…}` (the event's properties), `pug.WithTimestamp(t)`,
-`pug.WithSessionID(id)` (overrides the per-client session), `pug.WithLocation(loc)` (the
+Properties and traits are typed fields, passed in the same list as the call's options:
+
+| Field                                     | Event property                     | Trait              |
+| ----------------------------------------- | ---------------------------------- | ------------------ |
+| `pug.String(key, v)`                      | string                             | string             |
+| `pug.Int(key, v)` (any integer type)      | int                                | number             |
+| `pug.Float(key, v)`                       | double                             | number             |
+| `pug.Bool(key, v)`                        | bool                               | bool               |
+| `pug.Time(key, v)`                        | timestamp                          | RFC 3339 string    |
+| `pug.Duration(key, v)`                    | duration string, e.g. `"1.5s"`     | the same string    |
+| `pug.Any(key, v)`                         | mapped by Go type (table below)    | JSON               |
+
+When keys are only known at run time, pass a `pug.Properties` map to `Track` or a `pug.Traits` map
+to `Identify`; maps and fields mix freely, and a key set twice in one call takes the later value.
+
+The kind is a `pug.Kind`. A string literal converts on its own, and a kind held in a variable
+needs `pug.Kind(name)`, so a distinct ID passed where the kind belongs fails to compile.
+
+`Identify` also takes named traits, which write the keys Pug's dashboard reads. They only compile
+in `Identify`, and an empty value is omitted:
+
+| Named trait          | Key         |
+| -------------------- | ----------- |
+| `pug.Name(v)`        | `name`      |
+| `pug.FirstName(v)`   | `firstName` |
+| `pug.LastName(v)`    | `lastName`  |
+| `pug.Email(v)`       | `email`     |
+| `pug.Avatar(v)`      | `avatar` (the dashboard shows only an absolute https URL) |
+
+A NaN or ±Inf trait is dropped with a warning, and the rest of the identify still goes out.
+
+`Track` options: `pug.WithTimestamp(t)`, `pug.WithSessionID(id)` (overrides the per-client
+session; it must be a UUID, or it's ignored with a warning), `pug.WithLocation(loc)` (the
 visitor's location, see below).
-`Identify` options: `pug.Traits{…}`, `pug.WithAnonymousID(id)` (must start with `anon-`; triggers
-anon→identified merge), `pug.WithDeviceID(id)`.
+`Identify` options: `pug.WithAnonymousID(id)` (must start with `anon-`; triggers anon→identified
+merge), `pug.WithDeviceID(id)`.
 
-```go
-client.Track("user_42", "signup")
-client.Track("user_42", "order.completed", pug.Properties{"amount": 49.0}, pug.WithTimestamp(t))
-```
+All options, fields and maps included, are optional and can go in any order. A `map[string]any`
+needs converting, as `pug.Properties(m)`. A wrapper that takes its own props and
+`opts ...pug.TrackOption` forwards them as `append([]pug.TrackOption{props}, opts...)...`.
 
-A `map[string]any` needs converting, as `pug.Properties(m)`. A wrapper that takes its own props
-and `opts ...pug.TrackOption` forwards them as `append([]pug.TrackOption{props}, opts...)...`.
-
-For a well-known kind, `Track`'s `pug.Properties` are keyed by the schema fields' JSON names
+For a well-known kind, `Track`'s properties are keyed by the schema fields' JSON names
 (`productId`, not `product_id`) and must match their types; a field of the wrong type drops the
 event with an error. A key that is a field's proto name (`product_id`) doesn't set the field: it
 is sent as a custom property with a warning naming the JSON name, and if the field is required
-the event is dropped. Custom properties map by Go type:
+the event is dropped. `pug.Any` values and `pug.Properties` map by Go type:
 
 | Go value                                    | Sent as                                  |
 | ------------------------------------------- | ---------------------------------------- |
@@ -161,7 +190,7 @@ Pug only derives geo from CDN headers on browser (public-key) requests. This SDK
 key, so the server adds no geo of its own. Without a location, an event has no geo at all:
 
 ```go
-client.Track("user-123", "checkout_completed", pug.Properties{"plan": "pro"},
+client.Track("user-123", "checkout_completed", pug.String("plan", "pro"),
 	pug.WithLocation(pug.Location{Country: "DE", City: "Berlin"}),
 )
 ```

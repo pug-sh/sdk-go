@@ -26,6 +26,10 @@ commit, the same commit and allowlist as sdk-node. See the `Makefile`:
 | `make protos`       | `buf generate` → `gen/`. Offline.                                                                                                      |
 | `make proto-latest` | Print the newest commit on the module's `main` branch (to bump `PROTO_COMMIT`).                                                        |
 
+`PROTO_COMMIT` normally moves in lockstep with sdk-node, sdk-flutter, sdk-android, sdk-ruby and
+sdk-rust. sdk-go moved ahead of them alone to pick up `BatchIdentify` (2026-10-30); they keep the
+older pin until their own bump.
+
 To take a newer schema: run `make proto-latest`, set `PROTO_COMMIT` in the `Makefile`, then
 `make sync-protos && make protos`, run the tests, and review + commit the `proto/` and `gen/`
 diff. Builds and CI never touch the BSR: they compile the committed snapshot, and CI fails if a
@@ -84,13 +88,14 @@ The root package is the public API only. Everything between `Track` and the wire
 
 | File                          | Responsibility                                                            |
 | ----------------------------- | ------------------------------------------------------------------------- |
-| `client.go`                   | `Client`, `Options`, `New`: ingestion (`Track`/`TrackWellKnown`/`Identify`) and lifecycle; Connect clients with the `x-api-key` interceptor; the `BatchCreate` sink. |
-| `options.go`                  | `Properties`, `Traits`, per-call options, `Location`.                     |
+| `client.go`                   | `Client`, `Options`, `New`, `Kind`: ingestion (`Track`/`TrackWellKnown`/`Identify`) and lifecycle; Connect clients with the `x-api-key` interceptor; the `BatchCreate` sink and the identify sink, which falls back to one `Identify` per item when `BatchIdentify` answers `Unimplemented`. |
+| `fields.go`                   | `Field` and its constructors (`String`, `Int`, …); the named traits (`Name`, `FirstName`, …). |
+| `options.go`                  | `TrackOption`/`IdentifyOption`, `Properties`, `Traits`, the `With…` options, `Location`. |
 | `reads.go`                    | `Profiles`/`Activity`/`Insights` read facades.                            |
 | `errors.go`                   | `Error`, its per-code sentinels, and its normalization from Connect errors; the `OnError` sentinels. |
 | `doc.go`, `version.go`        | Package docs; SDK version.                                                |
 | `internal/ingest/event.go`    | `Builder`: builds and validates `Event` protos; maps Go values and typed schemas to `PropertyValue`; location. |
-| `internal/ingest/batch.go`    | `Batcher`: one sender goroutine, flush triggers, retry, dead-letter.      |
+| `internal/ingest/batch.go`    | `Batcher[T]`, one per queue (events, identifies): one sender goroutine, flush triggers, retry, dead-letter. |
 | `internal/ingest/wellknown.go`| Well-known event catalog from the proto options.                          |
 | `internal/ingest/countries.go`| ISO 3166-1 alpha-2 set, mirroring the server's `internal/geo`.            |
 | `internal/ingest/log.go`      | `Logger`, the `slog` wrapper that adds the `pug: ` prefix.                |
@@ -99,14 +104,16 @@ The root package is the public API only. Everything between `Track` and the wire
 
 The contract matches sdk-node; these are the places the Go port deliberately differs:
 
-- **One sender goroutine.** Flushes run sequentially instead of overlapping, so event order
-  holds across flushes.
+- **One sender goroutine per queue.** Flushes run sequentially instead of overlapping, so event
+  order holds across flushes. Identifies have their own queue and sender, so a burst of them
+  can't hold up event batches.
 - **Retry backoff.** A send stops at the first transiently failing chunk and re-queues it with
   the unsent ones, then waits `MaxWait` from the failure before retrying; size triggers during
   that wait don't retry early. During `Close`, the failed chunk is dead-lettered and the unsent
   rest reported as undelivered. `Close`'s flush is the last send: a `Flush` queued behind it
   sends nothing, so `Close` can't outlive its `ctx` waiting on one.
-- **Every drop is logged**, whether or not `OnError` is set; `OnError` receives the events too.
+- **Every drop is logged**, whether or not `OnError` is set; `OnError` receives the events or
+  identifies too.
 - **Byte-aware chunks.** Requests are also cut at 4 MiB, and an event that alone exceeds it is
   dropped at `Track`: the server refuses bodies over 8 MiB with a transient code, so an
   oversized batch would otherwise retry forever.
@@ -125,6 +132,23 @@ The contract matches sdk-node; these are the places the Go port deliberately dif
   a field's proto name (`product_id`) also logs a did-you-mean warning, as in sdk-python, and
   still goes out as a custom property. Unlike sdk-python, the warning comes before validation, so
   it also shows when the slip leaves a required field unset and the event is dropped.
+- **Typed call shape.** sdk-node takes plain objects for props and traits. Here they are fields
+  (`pug.String`, `pug.Int`, …) in the same variadic list as the `With…` options, with
+  `Properties`/`Traits` maps for run-time keys, and the kind is a `Kind`, so a swapped distinct ID
+  and kind fails to compile. Named traits (`Name`, `FirstName`, `LastName`, `Email`, `Avatar`)
+  write the keys the dashboard reads.
+- **Queued `Identify`.** sdk-node awaits the `Identify` RPC. Here `Identify` returns at once, and
+  identifies are sent in batches with `BatchIdentify`; a server that answers `Unimplemented` (one
+  older than `BatchIdentify`) gets one `Identify` call per item for the rest of the client's life.
+  `OnError` receives undeliverable identifies through `Undelivered.Identifies`; sdk-node's covers
+  events only.
+- **Bad session IDs.** A `WithSessionID` that isn't a hyphenated UUID is ignored with a warning,
+  and the event keeps the client's session instead of being dropped.
+
+**Porting:** sdk-ruby, sdk-rust and sdk-python (once it exists) copy this design, so the queued
+`Identify`, `BatchIdentify` with its `Unimplemented` fallback, and `OnError`'s `Undelivered` need
+porting to them. `Kind` and typed fields are Go idioms; those SDKs would get the same safety their
+own way (keyword arguments, say).
 
 ## Testing notes
 
