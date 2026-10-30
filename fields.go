@@ -1,6 +1,10 @@
 package pug
 
-import "time"
+import (
+	"time"
+
+	"github.com/pug-sh/sdk-go/internal/ingest"
+)
 
 // Field is one event property or profile trait, made by String, Int, Float, Bool, Time,
 // Duration or Any. It goes in the same list as the call's other options, so the key sits next
@@ -11,6 +15,44 @@ type Field struct {
 }
 
 func (f Field) applyTrack(o *trackOptions) { o.props = merge(o.props, Properties{f.key: f.value}) }
+
+func (f Field) applyIdentify(o *identifyOptions) {
+	// encoding/json would write a Duration as nanoseconds; a trait gets the same "1.5s" an
+	// event property does.
+	if d, ok := f.value.(time.Duration); ok {
+		o.traits = merge(o.traits, Traits{f.key: ingest.FormatDuration(d)})
+		return
+	}
+	o.traits = merge(o.traits, Traits{f.key: f.value})
+}
+
+// namedTrait is a trait the dashboard reads under a fixed key. It implements only
+// IdentifyOption, so passing one to Track fails to compile. An empty value is omitted, so a
+// blank column can't erase a stored trait.
+type namedTrait struct{ key, value string }
+
+func (t namedTrait) applyIdentify(o *identifyOptions) {
+	if t.value != "" {
+		o.traits = merge(o.traits, Traits{t.key: t.value})
+	}
+}
+
+// Name is the profile's display name, sent as the "name" trait.
+func Name(value string) IdentifyOption { return namedTrait{"name", value} }
+
+// FirstName is the profile's first name, sent as the "firstName" trait. With LastName, the
+// dashboard composes a display name when Name is unset.
+func FirstName(value string) IdentifyOption { return namedTrait{"firstName", value} }
+
+// LastName is the profile's last name, sent as the "lastName" trait.
+func LastName(value string) IdentifyOption { return namedTrait{"lastName", value} }
+
+// Email is the profile's email address, sent as the "email" trait.
+func Email(value string) IdentifyOption { return namedTrait{"email", value} }
+
+// Avatar is the URL of the profile's picture, sent as the "avatar" trait. The dashboard shows
+// only an absolute https URL.
+func Avatar(value string) IdentifyOption { return namedTrait{"avatar", value} }
 
 // integer is every Go integer type Int accepts.
 type integer interface {

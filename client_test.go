@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"math"
 	"strings"
 	"testing"
 	"time"
@@ -345,7 +344,6 @@ func TestIdentifyRefusesBadInputWithoutDialing(t *testing.T) {
 		{"reserved prefix", "cookieless-abc", nil, "invalid identify request"},
 		{"long device id", "user_1", []IdentifyOption{WithDeviceID(strings.Repeat("d", 37))}, "invalid identify request"},
 		{"invalid UTF-8", "user\xff", nil, "valid UTF-8"},
-		{"NaN trait", "user_1", []IdentifyOption{Traits{"score": math.NaN()}}, "JSON-serializable"},
 		{"func trait", "user_1", []IdentifyOption{Traits{"f": func() {}}}, "JSON-serializable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

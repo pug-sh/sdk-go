@@ -479,7 +479,7 @@ func customValue(log Logger, v any) (*commonv1.PropertyValue, error) {
 		}
 		return timeValue(*v)
 	case time.Duration:
-		return stringValue(log, formatDuration(int64(v/time.Second), int32(v%time.Second))), nil
+		return stringValue(log, FormatDuration(v)), nil
 	case json.Number:
 		return numberValue(v)
 	case *timestamppb.Timestamp:
@@ -648,6 +648,11 @@ func doubleValue(f float64) *commonv1.PropertyValue {
 
 func boolValue(b bool) *commonv1.PropertyValue {
 	return &commonv1.PropertyValue{Value: &commonv1.PropertyValue_BoolValue{BoolValue: b}}
+}
+
+// FormatDuration renders d in options.proto's wire form for a Duration, such as "1.5s".
+func FormatDuration(d time.Duration) string {
+	return formatDuration(int64(d/time.Second), int32(d%time.Second))
 }
 
 // formatDuration renders options.proto's wire form for a Duration, "1.5s", rather than

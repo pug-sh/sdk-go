@@ -20,9 +20,9 @@ type Properties map[string]any
 
 func (p Properties) applyTrack(o *trackOptions) { o.props = merge(o.props, p) }
 
-// Traits are profile properties, passed to [Client.Identify] among its options and
-// shallow-merged into the stored ones; given more than once, they are merged, later keys
-// winning. They must be JSON-serializable.
+// Traits are profile traits as a map, for keys only known at run time, passed to
+// [Client.Identify] among its options like a [Field] and shallow-merged into the stored ones;
+// given more than once, they are merged, later keys winning. They must be JSON-serializable.
 type Traits map[string]any
 
 func (t Traits) applyIdentify(o *identifyOptions) { o.traits = merge(o.traits, t) }
@@ -118,8 +118,9 @@ type Coordinates struct {
 	Longitude float64
 }
 
-// IdentifyOption customizes a [Client.Identify] call: the profile's [Traits], or an option
-// such as [WithAnonymousID].
+// IdentifyOption customizes one [Client.Identify] call: a [Field], a named trait such as
+// [Email], the profile's [Traits], or an option such as [WithAnonymousID]. Nil options are
+// skipped.
 type IdentifyOption interface{ applyIdentify(o *identifyOptions) }
 
 type identifyOption func(*identifyOptions)
@@ -127,9 +128,23 @@ type identifyOption func(*identifyOptions)
 func (f identifyOption) applyIdentify(o *identifyOptions) { f(o) }
 
 type identifyOptions struct {
+	// traits holds the fields, named traits and Traits given among the options, merged in call
+	// order; a repeated key takes the later value.
 	traits      Traits
 	anonymousID string
 	deviceID    string
+}
+
+func identifyOpts(opts []IdentifyOption) identifyOptions {
+	var o identifyOptions
+	for _, opt := range opts {
+		// A nil *Traits is an IdentifyOption through Traits' method, but calling it panics.
+		if t, ok := opt.(*Traits); opt == nil || ok && t == nil {
+			continue
+		}
+		opt.applyIdentify(&o)
+	}
+	return o
 }
 
 // WithAnonymousID names the SDK anonymous id (it must start with "anon-") whose profile is

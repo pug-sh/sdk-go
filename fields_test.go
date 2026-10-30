@@ -112,6 +112,95 @@ func TestTrackSkipsNilOptions(t *testing.T) {
 	}
 }
 
+func TestIdentifyTakesTraitFields(t *testing.T) {
+	sdk := &fakeProfilesSDK{}
+	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
+	since := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	c.Identify(t.Context(), "user_1",
+		Name("Ada Lovelace"), FirstName("Ada"), LastName("Lovelace"), Email("ada@example.com"), Avatar("https://example.com/a.png"),
+		String("plan", "pro"), Int("seats", 3), Bool("trial", true), Duration("tenure", 90*time.Second), Time("since", since),
+		Traits{"tags": []string{"a"}}, WithAnonymousID("anon-1"))
+	reqs := sdk.calls()
+	if len(reqs) != 1 {
+		t.Fatalf("got %d identify calls; logs %v", len(reqs), l.records)
+	}
+	traits := reqs[0].GetTraits().AsMap()
+	for key, want := range map[string]any{
+		"name": "Ada Lovelace", "firstName": "Ada", "lastName": "Lovelace", "email": "ada@example.com",
+		"avatar": "https://example.com/a.png", "plan": "pro", "seats": float64(3), "trial": true,
+		"tenure": "90s", "since": "2026-01-02T03:04:05Z",
+	} {
+		if traits[key] != want {
+			t.Errorf("%s = %v, want %v", key, traits[key], want)
+		}
+	}
+	if tags, ok := traits["tags"].([]any); !ok || len(tags) != 1 {
+		t.Errorf("tags = %v", traits["tags"])
+	}
+	if got := reqs[0].GetAnonymousId(); got != "anon-1" {
+		t.Errorf("anonymous id = %q", got)
+	}
+}
+
+func TestNamedTraitWithEmptyValueIsOmitted(t *testing.T) {
+	sdk := &fakeProfilesSDK{}
+	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
+	c.Identify(t.Context(), "user_1", Email(""), FirstName("Ada"))
+	traits := sdk.calls()[0].GetTraits().AsMap()
+	if _, ok := traits["email"]; ok || traits["firstName"] != "Ada" {
+		t.Errorf("traits = %v, want firstName and no email", traits)
+	}
+}
+
+func TestLaterTraitWins(t *testing.T) {
+	sdk := &fakeProfilesSDK{}
+	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
+	c.Identify(t.Context(), "user_1", FirstName("Ada"), String("firstName", "Grace"))
+	c.Identify(t.Context(), "user_2", String("firstName", "Grace"), FirstName("Ada"))
+	reqs := sdk.calls()
+	if len(reqs) != 2 {
+		t.Fatalf("got %d identify calls", len(reqs))
+	}
+	if got := reqs[0].GetTraits().AsMap()["firstName"]; got != "Grace" {
+		t.Errorf("first identify firstName = %v, want Grace", got)
+	}
+	if got := reqs[1].GetTraits().AsMap()["firstName"]; got != "Ada" {
+		t.Errorf("second identify firstName = %v, want Ada", got)
+	}
+}
+
+func TestNonFiniteTraitIsSkipped(t *testing.T) {
+	sdk := &fakeProfilesSDK{}
+	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
+	c.Identify(t.Context(), "user_1", Float("score", math.NaN()), String("plan", "pro"))
+	reqs := sdk.calls()
+	if len(reqs) != 1 {
+		t.Fatalf("got %d identify calls; a non-finite trait should cost only itself; logs %v", len(reqs), l.records)
+	}
+	traits := reqs[0].GetTraits().AsMap()
+	if _, ok := traits["score"]; ok || traits["plan"] != "pro" {
+		t.Errorf("traits = %v, want plan and no score", traits)
+	}
+	if r := l.find(t, slog.LevelWarn, "trait not representable"); r.attrs["trait"] != "score" {
+		t.Errorf("log = %v", r)
+	}
+}
+
+// Traits merge without copying a lone map, so dropping a bad value must not write to the
+// caller's map.
+func TestNonFiniteTraitLeavesTheCallersMapAlone(t *testing.T) {
+	sdk := &fakeProfilesSDK{}
+	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
+	traits := Traits{"score": math.NaN(), "plan": "pro"}
+	c.Identify(t.Context(), "user_1", traits)
+	if _, ok := traits["score"]; !ok || len(traits) != 2 {
+		t.Errorf("the caller's map was written to: %v", traits)
+	}
+	if got := sdk.calls()[0].GetTraits().AsMap(); got["plan"] != "pro" || got["score"] != nil {
+		t.Errorf("traits = %v, want plan and no score", got)
+	}
+}
+
 func TestTrackWellKnownTakesFieldExtras(t *testing.T) {
 	events := &fakeEvents{}
 	c, l := newTestClient(t, rpcClients{events: events}, Options{})

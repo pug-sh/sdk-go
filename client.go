@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -216,9 +218,10 @@ func (c *Client) accept(distinctID, kind string) bool {
 	return false
 }
 
-// Identify creates or updates the profile for externalID, shallow-merging the [Traits] among
-// opts into its stored properties. It blocks until the server answers. It never fails: invalid
-// input and request failures are logged.
+// Identify creates or updates the profile for externalID, shallow-merging its traits into the
+// stored properties. Traits are fields (String, Int, …), named traits (Name, FirstName,
+// LastName, Email, Avatar) and Traits maps, in the same list as the With… options. It blocks
+// until the server answers. It never fails: invalid input and request failures are logged.
 func (c *Client) Identify(ctx context.Context, externalID string, opts ...IdentifyOption) {
 	defer c.recoverPanic("Identify")
 	if c.closed.Load() {
@@ -229,13 +232,7 @@ func (c *Client) Identify(ctx context.Context, externalID string, opts ...Identi
 		c.log.Error("Identify requires a non-empty externalID")
 		return
 	}
-	var o identifyOptions
-	for _, opt := range opts {
-		if t, ok := opt.(*Traits); opt == nil || ok && t == nil {
-			continue
-		}
-		opt.applyIdentify(&o)
-	}
+	o := identifyOpts(opts)
 	if !utf8.ValidString(externalID) || !utf8.ValidString(o.anonymousID) || !utf8.ValidString(o.deviceID) {
 		c.log.Error("Identify ids must be valid UTF-8")
 		return
@@ -247,7 +244,8 @@ func (c *Client) Identify(ctx context.Context, externalID string, opts ...Identi
 	if o.deviceID != "" {
 		req.DeviceId = proto.String(o.deviceID)
 	}
-	if o.traits != nil {
+	o.traits = c.dropNonFinite(o.traits)
+	if len(o.traits) > 0 {
 		s, err := toStruct(o.traits)
 		if err != nil {
 			c.log.Error("Identify traits must be JSON-serializable", "err", err)
@@ -264,6 +262,32 @@ func (c *Client) Identify(ctx context.Context, externalID string, opts ...Identi
 	if _, err := c.rpc.profilesSDK.Identify(ctx, connect.NewRequest(req)); err != nil {
 		c.log.Error("identify failed", "external_id", externalID, "err", err)
 	}
+}
+
+// dropNonFinite returns traits without their top-level NaN or ±Inf values, which would
+// otherwise fail the whole identify's JSON encoding, so a bad value costs only its own trait.
+// traits may be the caller's own map, so it is copied before anything is removed.
+func (c *Client) dropNonFinite(traits Traits) Traits {
+	out, copied := traits, false
+	for k, v := range traits {
+		var f float64
+		switch v := v.(type) {
+		case float64:
+			f = v
+		case float32:
+			f = float64(v)
+		default:
+			continue
+		}
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			c.log.Warn("trait not representable; skipping", "trait", k, "value", f)
+			if !copied {
+				out, copied = maps.Clone(traits), true
+			}
+			delete(out, k)
+		}
+	}
+	return out
 }
 
 // A JSON round trip accepts anything encoding/json does (structs, typed slices, time.Time),
