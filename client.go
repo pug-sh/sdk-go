@@ -147,30 +147,35 @@ func newClient(rpc rpcClients, opts Options, sessionID string) *Client {
 	return c
 }
 
+// Kind is an event's kind, such as "order.completed". An untyped string constant converts to
+// it implicitly; a string variable needs Kind(s), so a distinct ID passed where the kind
+// belongs fails to compile.
+type Kind string
+
 // Track enqueues an event of kind for distinctID and returns at once; a background goroutine
-// sends events in batches. It never fails: invalid input is logged and dropped.
+// sends events in batches. Its properties are fields (String, Int, …) and Properties maps, in
+// the same list as the With… options. It never fails: invalid input is logged and dropped.
 //
-// The event's [Properties], if any, go among opts. For a well-known kind such as "purchase",
-// they are checked against the event's schema, keyed by the fields' JSON names ("productId";
-// "product_id" logs a warning), and other keys ride along as custom properties. Any other kind
-// is a custom event with free-form properties. [Client.TrackWellKnown] takes the typed schema
-// instead.
-func (c *Client) Track(distinctID, kind string, opts ...TrackOption) {
-	defer c.recoverPanic("Track", "kind", kind)
-	if !c.accept(distinctID, kind) {
+// For a well-known kind such as "purchase", properties are checked against the event's schema,
+// keyed by the fields' JSON names ("productId"; "product_id" logs a warning), and other keys
+// ride along as custom properties. Any other kind is a custom event with free-form properties.
+// [Client.TrackWellKnown] takes the typed schema instead.
+func (c *Client) Track(distinctID string, kind Kind, opts ...TrackOption) {
+	defer c.recoverPanic("Track", "kind", string(kind))
+	if !c.accept(distinctID, string(kind)) {
 		return
 	}
 	o := trackOpts(opts)
-	if ev := c.events.Build(kind, distinctID, o.props, o.Options); ev != nil {
+	if ev := c.events.Build(string(kind), distinctID, o.props, o.Options); ev != nil {
 		c.queue.Enqueue(ev)
 	}
 }
 
 // TrackWellKnown enqueues a well-known event from its typed properties message, such as
 // &commoneventsv1.PurchaseProperties{...}; the kind comes from the message's schema.
-// [Properties] among opts are sent as custom properties alongside the typed fields, except one
-// keyed by a typed field's JSON name, which is dropped. Like Track, it never fails: invalid
-// input is logged and dropped.
+// [Field]s and [Properties] among opts are sent as custom properties alongside the typed
+// fields, except one keyed by a typed field's JSON name, which is dropped. Like Track, it never
+// fails: invalid input is logged and dropped.
 func (c *Client) TrackWellKnown(distinctID string, event proto.Message, opts ...TrackOption) {
 	defer c.recoverPanic("TrackWellKnown", "message", fmt.Sprintf("%T", event))
 	if event == nil {

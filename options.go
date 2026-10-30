@@ -9,9 +9,9 @@ import (
 	"github.com/pug-sh/sdk-go/internal/ingest"
 )
 
-// Properties are an event's custom properties, passed to [Client.Track] or
-// [Client.TrackWellKnown] among its options; given more than once, they are merged, later keys
-// winning. Strings, booleans, integers and floats keep their type; time.Time becomes a
+// Properties are an event's custom properties as a map, for keys only known at run time,
+// passed to [Client.Track] or [Client.TrackWellKnown] among its options like a [Field]; given
+// more than once, they are merged, later keys winning. Strings, booleans, integers and floats keep their type; time.Time becomes a
 // timestamp and time.Duration a duration string like "1.5s"; json.Number is an integer when it
 // has no fraction; a value implementing encoding.TextMarshaler is sent as its text; other maps,
 // slices and structs are sent as JSON strings. Nil values are omitted, and a value that can't
@@ -40,8 +40,8 @@ func merge[M ~map[string]any](dst, src M) M {
 	return out
 }
 
-// TrackOption customizes one tracked event: its [Properties], or an option such as
-// [WithTimestamp].
+// TrackOption customizes one tracked event: a [Field], its [Properties], or an option such
+// as [WithTimestamp]. Nil options are skipped.
 type TrackOption interface{ applyTrack(o *trackOptions) }
 
 type trackOption func(*trackOptions)
@@ -74,7 +74,7 @@ func WithTimestamp(t time.Time) TrackOption {
 }
 
 // WithSessionID overrides the client's per-instance session id. It must be a UUID; an empty
-// id keeps the default.
+// id keeps the default, and any other id is ignored with a warning.
 func WithSessionID(id string) TrackOption {
 	return trackOption(func(o *trackOptions) { o.SessionID = id })
 }

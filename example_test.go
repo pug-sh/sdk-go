@@ -23,7 +23,7 @@ func Example() {
 	}
 	ctx := context.Background()
 
-	client.Track("user_42", "order.completed", pug.Properties{"amount": 49.0, "currency": "USD"})
+	client.Track("user_42", "order.completed", pug.Float("amount", 49.0), pug.String("currency", "USD"))
 	client.TrackWellKnown("user_42", &commoneventsv1.FeatureUsedProperties{FeatureId: proto.String("export")})
 	client.Identify(ctx, "user_42", pug.Traits{"email": "ada@example.com", "plan": "pro"})
 
@@ -42,10 +42,18 @@ func ExampleClient_Track() {
 	client, _ := pug.New(pug.Options{APIKey: os.Getenv("PUG_API_KEY")})
 	defer client.Close(context.Background())
 
-	client.Track("user_123", "checkout_completed", pug.Properties{"plan": "pro"},
+	client.Track("user_123", "checkout_completed", pug.String("plan", "pro"),
 		pug.WithLocation(pug.Location{Country: "DE", City: "Berlin"}),
 		pug.WithTimestamp(time.Now().Add(-time.Minute)),
 	)
+}
+
+func ExampleKind() {
+	client, _ := pug.New(pug.Options{APIKey: os.Getenv("PUG_API_KEY")})
+	defer client.Close(context.Background())
+
+	kind := os.Getenv("CHECKOUT_EVENT") // a kind held in a variable needs the conversion
+	client.Track("user_42", pug.Kind(kind), pug.Float("amount", 49))
 }
 
 func ExampleClient_TrackWellKnown() {
@@ -56,7 +64,7 @@ func ExampleClient_TrackWellKnown() {
 		Amount:   proto.Float64(49),
 		Currency: proto.String("USD"),
 		OrderId:  proto.String("ord_1"),
-	}, pug.Properties{"coupon": "FALL25"})
+	}, pug.String("coupon", "FALL25"))
 }
 
 func ExampleClient_Close() {
