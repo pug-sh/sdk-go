@@ -11,6 +11,9 @@ service ProfilesSDKService {
   // is provided, the anonymous profile is merged into the identified one
   // (properties, devices) and then soft-deleted.
   rpc Identify(IdentifyRequest) returns (IdentifyResponse);
+  // BatchIdentify applies many identifies in one request, each exactly as
+  // Identify would. Server SDKs queue identifies and send them this way.
+  rpc BatchIdentify(BatchIdentifyRequest) returns (BatchIdentifyResponse);
 }
 
 message IdentifyRequest {
@@ -45,6 +48,17 @@ message IdentifyRequest {
 }
 
 message IdentifyResponse {}
+
+message BatchIdentifyRequest {
+  // Each item is validated with IdentifyRequest's rules; one invalid item
+  // fails the whole request.
+  repeated IdentifyRequest identifies = 1 [(buf.validate.field).repeated.max_items = 1000];
+}
+
+message BatchIdentifyResponse {
+  // Identifies published for the worker; on success, the number sent.
+  uint32 accepted = 1;
+}
 
 // ProfileIdentifyMessage is the internal NATS envelope for the identify worker.
 // project_id is injected server-side from the authenticated principal.

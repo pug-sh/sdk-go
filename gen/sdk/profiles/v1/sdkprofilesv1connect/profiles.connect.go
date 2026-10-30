@@ -36,6 +36,9 @@ const (
 	// ProfilesSDKServiceIdentifyProcedure is the fully-qualified name of the ProfilesSDKService's
 	// Identify RPC.
 	ProfilesSDKServiceIdentifyProcedure = "/sdk.profiles.v1.ProfilesSDKService/Identify"
+	// ProfilesSDKServiceBatchIdentifyProcedure is the fully-qualified name of the ProfilesSDKService's
+	// BatchIdentify RPC.
+	ProfilesSDKServiceBatchIdentifyProcedure = "/sdk.profiles.v1.ProfilesSDKService/BatchIdentify"
 )
 
 // ProfilesSDKServiceClient is a client for the sdk.profiles.v1.ProfilesSDKService service.
@@ -44,6 +47,9 @@ type ProfilesSDKServiceClient interface {
 	// is provided, the anonymous profile is merged into the identified one
 	// (properties, devices) and then soft-deleted.
 	Identify(context.Context, *connect.Request[v1.IdentifyRequest]) (*connect.Response[v1.IdentifyResponse], error)
+	// BatchIdentify applies many identifies in one request, each exactly as
+	// Identify would. Server SDKs queue identifies and send them this way.
+	BatchIdentify(context.Context, *connect.Request[v1.BatchIdentifyRequest]) (*connect.Response[v1.BatchIdentifyResponse], error)
 }
 
 // NewProfilesSDKServiceClient constructs a client for the sdk.profiles.v1.ProfilesSDKService
@@ -63,17 +69,29 @@ func NewProfilesSDKServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(profilesSDKServiceMethods.ByName("Identify")),
 			connect.WithClientOptions(opts...),
 		),
+		batchIdentify: connect.NewClient[v1.BatchIdentifyRequest, v1.BatchIdentifyResponse](
+			httpClient,
+			baseURL+ProfilesSDKServiceBatchIdentifyProcedure,
+			connect.WithSchema(profilesSDKServiceMethods.ByName("BatchIdentify")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // profilesSDKServiceClient implements ProfilesSDKServiceClient.
 type profilesSDKServiceClient struct {
-	identify *connect.Client[v1.IdentifyRequest, v1.IdentifyResponse]
+	identify      *connect.Client[v1.IdentifyRequest, v1.IdentifyResponse]
+	batchIdentify *connect.Client[v1.BatchIdentifyRequest, v1.BatchIdentifyResponse]
 }
 
 // Identify calls sdk.profiles.v1.ProfilesSDKService.Identify.
 func (c *profilesSDKServiceClient) Identify(ctx context.Context, req *connect.Request[v1.IdentifyRequest]) (*connect.Response[v1.IdentifyResponse], error) {
 	return c.identify.CallUnary(ctx, req)
+}
+
+// BatchIdentify calls sdk.profiles.v1.ProfilesSDKService.BatchIdentify.
+func (c *profilesSDKServiceClient) BatchIdentify(ctx context.Context, req *connect.Request[v1.BatchIdentifyRequest]) (*connect.Response[v1.BatchIdentifyResponse], error) {
+	return c.batchIdentify.CallUnary(ctx, req)
 }
 
 // ProfilesSDKServiceHandler is an implementation of the sdk.profiles.v1.ProfilesSDKService service.
@@ -82,6 +100,9 @@ type ProfilesSDKServiceHandler interface {
 	// is provided, the anonymous profile is merged into the identified one
 	// (properties, devices) and then soft-deleted.
 	Identify(context.Context, *connect.Request[v1.IdentifyRequest]) (*connect.Response[v1.IdentifyResponse], error)
+	// BatchIdentify applies many identifies in one request, each exactly as
+	// Identify would. Server SDKs queue identifies and send them this way.
+	BatchIdentify(context.Context, *connect.Request[v1.BatchIdentifyRequest]) (*connect.Response[v1.BatchIdentifyResponse], error)
 }
 
 // NewProfilesSDKServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -97,10 +118,18 @@ func NewProfilesSDKServiceHandler(svc ProfilesSDKServiceHandler, opts ...connect
 		connect.WithSchema(profilesSDKServiceMethods.ByName("Identify")),
 		connect.WithHandlerOptions(opts...),
 	)
+	profilesSDKServiceBatchIdentifyHandler := connect.NewUnaryHandler(
+		ProfilesSDKServiceBatchIdentifyProcedure,
+		svc.BatchIdentify,
+		connect.WithSchema(profilesSDKServiceMethods.ByName("BatchIdentify")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/sdk.profiles.v1.ProfilesSDKService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ProfilesSDKServiceIdentifyProcedure:
 			profilesSDKServiceIdentifyHandler.ServeHTTP(w, r)
+		case ProfilesSDKServiceBatchIdentifyProcedure:
+			profilesSDKServiceBatchIdentifyHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -112,4 +141,8 @@ type UnimplementedProfilesSDKServiceHandler struct{}
 
 func (UnimplementedProfilesSDKServiceHandler) Identify(context.Context, *connect.Request[v1.IdentifyRequest]) (*connect.Response[v1.IdentifyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sdk.profiles.v1.ProfilesSDKService.Identify is not implemented"))
+}
+
+func (UnimplementedProfilesSDKServiceHandler) BatchIdentify(context.Context, *connect.Request[v1.BatchIdentifyRequest]) (*connect.Response[v1.BatchIdentifyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sdk.profiles.v1.ProfilesSDKService.BatchIdentify is not implemented"))
 }

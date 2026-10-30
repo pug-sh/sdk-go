@@ -83,6 +83,75 @@ func (ComplianceRequestStatus) EnumDescriptor() ([]byte, []int) {
 	return file_shared_profiles_v1_profiles_proto_rawDescGZIP(), []int{0}
 }
 
+// ProfileListSort names the ordering of List. Ordering is always descending
+// (newest or most recently active first), with the person id breaking ties.
+type ProfileListSort int32
+
+const (
+	// Defaults to PROFILE_LIST_SORT_CREATE_TIME.
+	ProfileListSort_PROFILE_LIST_SORT_UNSPECIFIED ProfileListSort = 0
+	// Profile.create_time: when an identified profile was created, or a derived
+	// anonymous person's first event. A backfilled older event moves the latter
+	// earlier, which can return that person twice in one pass.
+	ProfileListSort_PROFILE_LIST_SORT_CREATE_TIME ProfileListSort = 1
+	// ProfileActivitySummary.first_seen. A person with no recorded activity sorts as
+	// if seen at the epoch. First seen usually moves earlier mid-pagination, when an
+	// identify merges older anonymous history or an older event is backfilled. That
+	// can return the person twice on that pass. It moves later when a person gets
+	// their first event, or when an anonymous id is identified as another user and
+	// its history leaves the profile. That can miss the person on that pass.
+	ProfileListSort_PROFILE_LIST_SORT_FIRST_SEEN ProfileListSort = 2
+	// ProfileActivitySummary.last_seen. A person with no recorded activity sorts as
+	// if seen at the epoch. A person who becomes active mid-pagination moves above
+	// the cursor and is not returned on that pass; restart from an empty token to
+	// see them. Last seen moves earlier when an anonymous id is identified as another
+	// user and its history leaves the profile, which can return the person twice.
+	ProfileListSort_PROFILE_LIST_SORT_LAST_SEEN ProfileListSort = 3
+)
+
+// Enum value maps for ProfileListSort.
+var (
+	ProfileListSort_name = map[int32]string{
+		0: "PROFILE_LIST_SORT_UNSPECIFIED",
+		1: "PROFILE_LIST_SORT_CREATE_TIME",
+		2: "PROFILE_LIST_SORT_FIRST_SEEN",
+		3: "PROFILE_LIST_SORT_LAST_SEEN",
+	}
+	ProfileListSort_value = map[string]int32{
+		"PROFILE_LIST_SORT_UNSPECIFIED": 0,
+		"PROFILE_LIST_SORT_CREATE_TIME": 1,
+		"PROFILE_LIST_SORT_FIRST_SEEN":  2,
+		"PROFILE_LIST_SORT_LAST_SEEN":   3,
+	}
+)
+
+func (x ProfileListSort) Enum() *ProfileListSort {
+	p := new(ProfileListSort)
+	*p = x
+	return p
+}
+
+func (x ProfileListSort) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProfileListSort) Descriptor() protoreflect.EnumDescriptor {
+	return file_shared_profiles_v1_profiles_proto_enumTypes[1].Descriptor()
+}
+
+func (ProfileListSort) Type() protoreflect.EnumType {
+	return &file_shared_profiles_v1_profiles_proto_enumTypes[1]
+}
+
+func (x ProfileListSort) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProfileListSort.Descriptor instead.
+func (ProfileListSort) EnumDescriptor() ([]byte, []int) {
+	return file_shared_profiles_v1_profiles_proto_rawDescGZIP(), []int{1}
+}
+
 type DeleteRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            *string                `protobuf:"bytes,1,opt,name=id" json:"id,omitempty"`
@@ -680,15 +749,21 @@ func (x *FilterGroup) GetOperator() v1.LogicalOperator {
 type ListRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Opaque cursor from a previous response's next_page_token. Empty for the first page.
+	// A token is bound to the sort it was issued under, since the seek predicate is
+	// built from the ordering column; send the same sort back, or restart from an
+	// empty token to change it.
 	PageToken            *string             `protobuf:"bytes,1,opt,name=page_token,json=pageToken" json:"page_token,omitempty"`
 	FilterGroups         []*FilterGroup      `protobuf:"bytes,2,rep,name=filter_groups,json=filterGroups" json:"filter_groups,omitempty"`
 	FilterGroupsOperator *v1.LogicalOperator `protobuf:"varint,3,opt,name=filter_groups_operator,json=filterGroupsOperator,enum=common.v1.LogicalOperator" json:"filter_groups_operator,omitempty"`
 	// Optional. Traffic tagged as automated at ingest ($bot: crawler user agents
 	// and datacenter networks) is EXCLUDED by default. Set true to include bots.
-	// A derived anonymous person's create_time — the sort and cursor key — is
-	// computed after this filter, so changing it mid-pagination skips rows. Keep it
-	// constant for a page_token run and restart from an empty token to flip it.
-	IncludeBots   *bool `protobuf:"varint,4,opt,name=include_bots,json=includeBots" json:"include_bots,omitempty"`
+	// The sort key (first or last seen, or a derived anonymous person's
+	// create_time, which is its first event) is computed after this filter, so
+	// changing it mid-pagination skips rows. Keep it constant for a page_token run
+	// and restart from an empty token to flip it.
+	IncludeBots *bool `protobuf:"varint,4,opt,name=include_bots,json=includeBots" json:"include_bots,omitempty"`
+	// Optional. Defaults to PROFILE_LIST_SORT_CREATE_TIME.
+	Sort          *ProfileListSort `protobuf:"varint,5,opt,name=sort,enum=shared.profiles.v1.ProfileListSort" json:"sort,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -749,6 +824,13 @@ func (x *ListRequest) GetIncludeBots() bool {
 		return *x.IncludeBots
 	}
 	return false
+}
+
+func (x *ListRequest) GetSort() ProfileListSort {
+	if x != nil && x.Sort != nil {
+		return *x.Sort
+	}
+	return ProfileListSort_PROFILE_LIST_SORT_UNSPECIFIED
 }
 
 type ListResponse struct {
@@ -820,7 +902,7 @@ type ProfileActivitySummary struct {
 	Region         *string                `protobuf:"bytes,12,opt,name=region" json:"region,omitempty"`
 	City           *string                `protobuf:"bytes,13,opt,name=city" json:"city,omitempty"`
 	// True when EVERY event counted in this summary was tagged as automated at
-	// ingest ($bot) — a crawler, not a user with one tagged event. Only ever true
+	// ingest ($bot): a crawler, not a user with one tagged event. Only ever true
 	// on a read that set include_bots, since bot traffic is otherwise excluded.
 	Bot           *bool `protobuf:"varint,14,opt,name=bot" json:"bot,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1094,13 +1176,14 @@ const file_shared_profiles_v1_profiles_proto_rawDesc = "" +
 	"\aprofile\x18\x01 \x01(\v2\x1b.shared.profiles.v1.ProfileR\aprofile\"\x84\x01\n" +
 	"\vFilterGroup\x12=\n" +
 	"\afilters\x18\x01 \x03(\v2\x19.common.v1.PropertyFilterB\b\xbaH\x05\x92\x01\x02\b\x01R\afilters\x126\n" +
-	"\boperator\x18\x02 \x01(\x0e2\x1a.common.v1.LogicalOperatorR\boperator\"\xe7\x01\n" +
+	"\boperator\x18\x02 \x01(\x0e2\x1a.common.v1.LogicalOperatorR\boperator\"\xaa\x02\n" +
 	"\vListRequest\x12\x1d\n" +
 	"\n" +
 	"page_token\x18\x01 \x01(\tR\tpageToken\x12D\n" +
 	"\rfilter_groups\x18\x02 \x03(\v2\x1f.shared.profiles.v1.FilterGroupR\ffilterGroups\x12P\n" +
 	"\x16filter_groups_operator\x18\x03 \x01(\x0e2\x1a.common.v1.LogicalOperatorR\x14filterGroupsOperator\x12!\n" +
-	"\finclude_bots\x18\x04 \x01(\bR\vincludeBots\"o\n" +
+	"\finclude_bots\x18\x04 \x01(\bR\vincludeBots\x12A\n" +
+	"\x04sort\x18\x05 \x01(\x0e2#.shared.profiles.v1.ProfileListSortB\b\xbaH\x05\x82\x01\x02\x10\x01R\x04sort\"o\n" +
 	"\fListResponse\x127\n" +
 	"\bprofiles\x18\x01 \x03(\v2\x1b.shared.profiles.v1.ProfileR\bprofiles\x12&\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xcb\x03\n" +
@@ -1141,7 +1224,12 @@ const file_shared_profiles_v1_profiles_proto_rawDesc = "" +
 	"!COMPLIANCE_REQUEST_STATUS_PENDING\x10\x01\x12(\n" +
 	"$COMPLIANCE_REQUEST_STATUS_PROCESSING\x10\x02\x12'\n" +
 	"#COMPLIANCE_REQUEST_STATUS_COMPLETED\x10\x03\x12$\n" +
-	" COMPLIANCE_REQUEST_STATUS_FAILED\x10\x042\xd6\x04\n" +
+	" COMPLIANCE_REQUEST_STATUS_FAILED\x10\x04*\x9a\x01\n" +
+	"\x0fProfileListSort\x12!\n" +
+	"\x1dPROFILE_LIST_SORT_UNSPECIFIED\x10\x00\x12!\n" +
+	"\x1dPROFILE_LIST_SORT_CREATE_TIME\x10\x01\x12 \n" +
+	"\x1cPROFILE_LIST_SORT_FIRST_SEEN\x10\x02\x12\x1f\n" +
+	"\x1bPROFILE_LIST_SORT_LAST_SEEN\x10\x032\xd6\x04\n" +
 	"\x0fProfilesService\x12H\n" +
 	"\x03Get\x12\x1e.shared.profiles.v1.GetRequest\x1a\x1f.shared.profiles.v1.GetResponse\"\x00\x12l\n" +
 	"\x0fGetByExternalId\x12*.shared.profiles.v1.GetByExternalIdRequest\x1a+.shared.profiles.v1.GetByExternalIdResponse\"\x00\x12M\n" +
@@ -1163,66 +1251,68 @@ func file_shared_profiles_v1_profiles_proto_rawDescGZIP() []byte {
 	return file_shared_profiles_v1_profiles_proto_rawDescData
 }
 
-var file_shared_profiles_v1_profiles_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_shared_profiles_v1_profiles_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_shared_profiles_v1_profiles_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_shared_profiles_v1_profiles_proto_goTypes = []any{
 	(ComplianceRequestStatus)(0),       // 0: shared.profiles.v1.ComplianceRequestStatus
-	(*DeleteRequest)(nil),              // 1: shared.profiles.v1.DeleteRequest
-	(*DeleteDataSubjectRequest)(nil),   // 2: shared.profiles.v1.DeleteDataSubjectRequest
-	(*DeleteResponse)(nil),             // 3: shared.profiles.v1.DeleteResponse
-	(*DeleteDataSubjectResponse)(nil),  // 4: shared.profiles.v1.DeleteDataSubjectResponse
-	(*GetDeletionRequestRequest)(nil),  // 5: shared.profiles.v1.GetDeletionRequestRequest
-	(*GetDeletionRequestResponse)(nil), // 6: shared.profiles.v1.GetDeletionRequestResponse
-	(*GetByExternalIdRequest)(nil),     // 7: shared.profiles.v1.GetByExternalIdRequest
-	(*GetByExternalIdResponse)(nil),    // 8: shared.profiles.v1.GetByExternalIdResponse
-	(*GetRequest)(nil),                 // 9: shared.profiles.v1.GetRequest
-	(*GetResponse)(nil),                // 10: shared.profiles.v1.GetResponse
-	(*FilterGroup)(nil),                // 11: shared.profiles.v1.FilterGroup
-	(*ListRequest)(nil),                // 12: shared.profiles.v1.ListRequest
-	(*ListResponse)(nil),               // 13: shared.profiles.v1.ListResponse
-	(*ProfileActivitySummary)(nil),     // 14: shared.profiles.v1.ProfileActivitySummary
-	(*Profile)(nil),                    // 15: shared.profiles.v1.Profile
-	(*timestamppb.Timestamp)(nil),      // 16: google.protobuf.Timestamp
-	(*v1.PropertyFilter)(nil),          // 17: common.v1.PropertyFilter
-	(v1.LogicalOperator)(0),            // 18: common.v1.LogicalOperator
-	(*structpb.Struct)(nil),            // 19: google.protobuf.Struct
+	(ProfileListSort)(0),               // 1: shared.profiles.v1.ProfileListSort
+	(*DeleteRequest)(nil),              // 2: shared.profiles.v1.DeleteRequest
+	(*DeleteDataSubjectRequest)(nil),   // 3: shared.profiles.v1.DeleteDataSubjectRequest
+	(*DeleteResponse)(nil),             // 4: shared.profiles.v1.DeleteResponse
+	(*DeleteDataSubjectResponse)(nil),  // 5: shared.profiles.v1.DeleteDataSubjectResponse
+	(*GetDeletionRequestRequest)(nil),  // 6: shared.profiles.v1.GetDeletionRequestRequest
+	(*GetDeletionRequestResponse)(nil), // 7: shared.profiles.v1.GetDeletionRequestResponse
+	(*GetByExternalIdRequest)(nil),     // 8: shared.profiles.v1.GetByExternalIdRequest
+	(*GetByExternalIdResponse)(nil),    // 9: shared.profiles.v1.GetByExternalIdResponse
+	(*GetRequest)(nil),                 // 10: shared.profiles.v1.GetRequest
+	(*GetResponse)(nil),                // 11: shared.profiles.v1.GetResponse
+	(*FilterGroup)(nil),                // 12: shared.profiles.v1.FilterGroup
+	(*ListRequest)(nil),                // 13: shared.profiles.v1.ListRequest
+	(*ListResponse)(nil),               // 14: shared.profiles.v1.ListResponse
+	(*ProfileActivitySummary)(nil),     // 15: shared.profiles.v1.ProfileActivitySummary
+	(*Profile)(nil),                    // 16: shared.profiles.v1.Profile
+	(*timestamppb.Timestamp)(nil),      // 17: google.protobuf.Timestamp
+	(*v1.PropertyFilter)(nil),          // 18: common.v1.PropertyFilter
+	(v1.LogicalOperator)(0),            // 19: common.v1.LogicalOperator
+	(*structpb.Struct)(nil),            // 20: google.protobuf.Struct
 }
 var file_shared_profiles_v1_profiles_proto_depIdxs = []int32{
 	0,  // 0: shared.profiles.v1.DeleteResponse.status:type_name -> shared.profiles.v1.ComplianceRequestStatus
 	0,  // 1: shared.profiles.v1.DeleteDataSubjectResponse.status:type_name -> shared.profiles.v1.ComplianceRequestStatus
 	0,  // 2: shared.profiles.v1.GetDeletionRequestResponse.status:type_name -> shared.profiles.v1.ComplianceRequestStatus
-	16, // 3: shared.profiles.v1.GetDeletionRequestResponse.requested_at:type_name -> google.protobuf.Timestamp
-	16, // 4: shared.profiles.v1.GetDeletionRequestResponse.completed_at:type_name -> google.protobuf.Timestamp
-	15, // 5: shared.profiles.v1.GetByExternalIdResponse.profile:type_name -> shared.profiles.v1.Profile
-	15, // 6: shared.profiles.v1.GetResponse.profile:type_name -> shared.profiles.v1.Profile
-	17, // 7: shared.profiles.v1.FilterGroup.filters:type_name -> common.v1.PropertyFilter
-	18, // 8: shared.profiles.v1.FilterGroup.operator:type_name -> common.v1.LogicalOperator
-	11, // 9: shared.profiles.v1.ListRequest.filter_groups:type_name -> shared.profiles.v1.FilterGroup
-	18, // 10: shared.profiles.v1.ListRequest.filter_groups_operator:type_name -> common.v1.LogicalOperator
-	15, // 11: shared.profiles.v1.ListResponse.profiles:type_name -> shared.profiles.v1.Profile
-	16, // 12: shared.profiles.v1.ProfileActivitySummary.first_seen:type_name -> google.protobuf.Timestamp
-	16, // 13: shared.profiles.v1.ProfileActivitySummary.last_seen:type_name -> google.protobuf.Timestamp
-	16, // 14: shared.profiles.v1.Profile.create_time:type_name -> google.protobuf.Timestamp
-	19, // 15: shared.profiles.v1.Profile.properties:type_name -> google.protobuf.Struct
-	16, // 16: shared.profiles.v1.Profile.update_time:type_name -> google.protobuf.Timestamp
-	14, // 17: shared.profiles.v1.Profile.activity:type_name -> shared.profiles.v1.ProfileActivitySummary
-	9,  // 18: shared.profiles.v1.ProfilesService.Get:input_type -> shared.profiles.v1.GetRequest
-	7,  // 19: shared.profiles.v1.ProfilesService.GetByExternalId:input_type -> shared.profiles.v1.GetByExternalIdRequest
-	12, // 20: shared.profiles.v1.ProfilesService.List:input_type -> shared.profiles.v1.ListRequest
-	1,  // 21: shared.profiles.v1.ProfilesService.Delete:input_type -> shared.profiles.v1.DeleteRequest
-	2,  // 22: shared.profiles.v1.ProfilesService.DeleteDataSubject:input_type -> shared.profiles.v1.DeleteDataSubjectRequest
-	5,  // 23: shared.profiles.v1.ProfilesService.GetDeletionRequest:input_type -> shared.profiles.v1.GetDeletionRequestRequest
-	10, // 24: shared.profiles.v1.ProfilesService.Get:output_type -> shared.profiles.v1.GetResponse
-	8,  // 25: shared.profiles.v1.ProfilesService.GetByExternalId:output_type -> shared.profiles.v1.GetByExternalIdResponse
-	13, // 26: shared.profiles.v1.ProfilesService.List:output_type -> shared.profiles.v1.ListResponse
-	3,  // 27: shared.profiles.v1.ProfilesService.Delete:output_type -> shared.profiles.v1.DeleteResponse
-	4,  // 28: shared.profiles.v1.ProfilesService.DeleteDataSubject:output_type -> shared.profiles.v1.DeleteDataSubjectResponse
-	6,  // 29: shared.profiles.v1.ProfilesService.GetDeletionRequest:output_type -> shared.profiles.v1.GetDeletionRequestResponse
-	24, // [24:30] is the sub-list for method output_type
-	18, // [18:24] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	17, // 3: shared.profiles.v1.GetDeletionRequestResponse.requested_at:type_name -> google.protobuf.Timestamp
+	17, // 4: shared.profiles.v1.GetDeletionRequestResponse.completed_at:type_name -> google.protobuf.Timestamp
+	16, // 5: shared.profiles.v1.GetByExternalIdResponse.profile:type_name -> shared.profiles.v1.Profile
+	16, // 6: shared.profiles.v1.GetResponse.profile:type_name -> shared.profiles.v1.Profile
+	18, // 7: shared.profiles.v1.FilterGroup.filters:type_name -> common.v1.PropertyFilter
+	19, // 8: shared.profiles.v1.FilterGroup.operator:type_name -> common.v1.LogicalOperator
+	12, // 9: shared.profiles.v1.ListRequest.filter_groups:type_name -> shared.profiles.v1.FilterGroup
+	19, // 10: shared.profiles.v1.ListRequest.filter_groups_operator:type_name -> common.v1.LogicalOperator
+	1,  // 11: shared.profiles.v1.ListRequest.sort:type_name -> shared.profiles.v1.ProfileListSort
+	16, // 12: shared.profiles.v1.ListResponse.profiles:type_name -> shared.profiles.v1.Profile
+	17, // 13: shared.profiles.v1.ProfileActivitySummary.first_seen:type_name -> google.protobuf.Timestamp
+	17, // 14: shared.profiles.v1.ProfileActivitySummary.last_seen:type_name -> google.protobuf.Timestamp
+	17, // 15: shared.profiles.v1.Profile.create_time:type_name -> google.protobuf.Timestamp
+	20, // 16: shared.profiles.v1.Profile.properties:type_name -> google.protobuf.Struct
+	17, // 17: shared.profiles.v1.Profile.update_time:type_name -> google.protobuf.Timestamp
+	15, // 18: shared.profiles.v1.Profile.activity:type_name -> shared.profiles.v1.ProfileActivitySummary
+	10, // 19: shared.profiles.v1.ProfilesService.Get:input_type -> shared.profiles.v1.GetRequest
+	8,  // 20: shared.profiles.v1.ProfilesService.GetByExternalId:input_type -> shared.profiles.v1.GetByExternalIdRequest
+	13, // 21: shared.profiles.v1.ProfilesService.List:input_type -> shared.profiles.v1.ListRequest
+	2,  // 22: shared.profiles.v1.ProfilesService.Delete:input_type -> shared.profiles.v1.DeleteRequest
+	3,  // 23: shared.profiles.v1.ProfilesService.DeleteDataSubject:input_type -> shared.profiles.v1.DeleteDataSubjectRequest
+	6,  // 24: shared.profiles.v1.ProfilesService.GetDeletionRequest:input_type -> shared.profiles.v1.GetDeletionRequestRequest
+	11, // 25: shared.profiles.v1.ProfilesService.Get:output_type -> shared.profiles.v1.GetResponse
+	9,  // 26: shared.profiles.v1.ProfilesService.GetByExternalId:output_type -> shared.profiles.v1.GetByExternalIdResponse
+	14, // 27: shared.profiles.v1.ProfilesService.List:output_type -> shared.profiles.v1.ListResponse
+	4,  // 28: shared.profiles.v1.ProfilesService.Delete:output_type -> shared.profiles.v1.DeleteResponse
+	5,  // 29: shared.profiles.v1.ProfilesService.DeleteDataSubject:output_type -> shared.profiles.v1.DeleteDataSubjectResponse
+	7,  // 30: shared.profiles.v1.ProfilesService.GetDeletionRequest:output_type -> shared.profiles.v1.GetDeletionRequestResponse
+	25, // [25:31] is the sub-list for method output_type
+	19, // [19:25] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_shared_profiles_v1_profiles_proto_init() }
@@ -1235,7 +1325,7 @@ func file_shared_profiles_v1_profiles_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_shared_profiles_v1_profiles_proto_rawDesc), len(file_shared_profiles_v1_profiles_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
