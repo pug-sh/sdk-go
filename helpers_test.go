@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -172,6 +173,9 @@ type fakeProfilesSDK struct {
 	batches       [][]*sdkprofilesv1.IdentifyRequest
 	batchErr      error
 	batchAttempts int
+	// identifyDelay makes each Identify call take this long, or fail as the Connect client does
+	// when its context ends first.
+	identifyDelay time.Duration
 }
 
 func (f *fakeProfilesSDK) BatchIdentify(_ context.Context, req *connect.Request[sdkprofilesv1.BatchIdentifyRequest]) (*connect.Response[sdkprofilesv1.BatchIdentifyResponse], error) {
@@ -204,13 +208,24 @@ func (f *fakeProfilesSDK) attempts() int {
 	return f.batchAttempts
 }
 
-func (f *fakeProfilesSDK) Identify(_ context.Context, req *connect.Request[sdkprofilesv1.IdentifyRequest]) (*connect.Response[sdkprofilesv1.IdentifyResponse], error) {
+// Identify records the calls that succeed.
+func (f *fakeProfilesSDK) Identify(ctx context.Context, req *connect.Request[sdkprofilesv1.IdentifyRequest]) (*connect.Response[sdkprofilesv1.IdentifyResponse], error) {
+	f.mu.Lock()
+	delay, err := f.identifyDelay, f.err
+	f.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reqs = append(f.reqs, req.Msg)
-	if f.err != nil {
-		return nil, f.err
-	}
 	return connect.NewResponse(&sdkprofilesv1.IdentifyResponse{}), nil
 }
 

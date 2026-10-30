@@ -274,6 +274,10 @@ func (c *Client) Identify(externalID string, opts ...IdentifyOption) {
 		c.log.Error("invalid identify request", "violations", ingest.Violations(err))
 		return
 	}
+	if size := proto.Size(req); size > ingest.MaxItemBytes {
+		c.log.Error("identify dropped: too large to send", "bytes", size, "limit", ingest.MaxItemBytes)
+		return
+	}
 	c.identifies.Enqueue(req)
 }
 
@@ -440,11 +444,11 @@ func (s *identifySink) Send(ctx context.Context, items []*Identify) error {
 			s.log.Warn("server has no BatchIdentify; sending identifies one at a time")
 		}
 	}
-	// On a failure partway through, the retry resends the items before it; the server's
-	// identify worker tolerates repeats.
-	for _, item := range items {
+	// One deadline covers the whole chunk, so a slow server may not get through it; reporting
+	// the delivered prefix lets the next attempt carry on from the first unsent item.
+	for i, item := range items {
 		if _, err := s.client.Identify(ctx, connect.NewRequest(item)); err != nil {
-			return err
+			return &ingest.PartialSendError{Sent: i, Err: err}
 		}
 	}
 	return nil

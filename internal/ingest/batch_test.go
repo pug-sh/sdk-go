@@ -206,6 +206,47 @@ func TestBatchRetriesTransientErrors(t *testing.T) {
 	})
 }
 
+// A send that delivered part of a chunk before failing must not resend that part.
+func TestBatchRetriesOnlyTheUnsentRemainder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &fakeSink{fail: func(_ context.Context, call int, _ []*eventsv1.Event) error {
+			if call == 1 {
+				return &PartialSendError{Sent: 2, Err: errUnavailable}
+			}
+			return nil
+		}}
+		b, dl, _ := newTestBatcher(s, BatchConfig{MaxSize: 99, MaxWait: 10 * time.Second})
+		defer b.Close(t.Context())
+		for i := 1; i <= 3; i++ {
+			b.Enqueue(ev(i))
+		}
+		_ = b.Flush(t.Context())
+		_ = b.Flush(t.Context())
+		wantBatches(t, s, "3")
+		if got := dl.all(); len(got) != 0 {
+			t.Errorf("dead letters = %v", got)
+		}
+	})
+}
+
+func TestBatchDeadLettersOnlyTheUndeliveredRemainder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		perm := connect.NewError(connect.CodeInvalidArgument, errors.New("bad"))
+		s := &fakeSink{fail: func(context.Context, int, []*eventsv1.Event) error {
+			return &PartialSendError{Sent: 1, Err: perm}
+		}}
+		b, dl, _ := newTestBatcher(s, BatchConfig{MaxSize: 99, MaxWait: 10 * time.Second})
+		defer b.Close(t.Context())
+		for i := 1; i <= 3; i++ {
+			b.Enqueue(ev(i))
+		}
+		_ = b.Flush(t.Context())
+		if got := dl.all(); len(got) != 1 || got[0].ids != "2,3" || !errors.Is(got[0].err, perm) {
+			t.Errorf("dead letters = %v, want 2,3 with the permanent error", got)
+		}
+	})
+}
+
 func TestBatchDropsOldestOnOverflow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{}

@@ -3,6 +3,7 @@ package pug
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -443,6 +444,50 @@ func TestOnErrorReceivesUndeliverableIdentifies(t *testing.T) {
 	got := dl.all()
 	if len(got) != 1 || connect.CodeOf(got[0].err) != connect.CodeInvalidArgument || got[0].identifies != "user_1" || got[0].ids != "" {
 		t.Errorf("dead letters = %v", got)
+	}
+}
+
+// The server refuses bodies over 8 MiB with a transient code, so a queued oversized identify
+// would be retried forever, holding up every identify behind it.
+func TestOversizedIdentifyIsDroppedWithoutBlockingTheQueue(t *testing.T) {
+	sdk := &fakeProfilesSDK{}
+	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
+	c.Identify("user_big", Traits{"blob": strings.Repeat("x", 5<<20)})
+	c.Identify("user_small")
+	_ = c.Flush(t.Context())
+	if got := externalIDs(sdk.sentIdentifies()); got != "user_small" {
+		t.Errorf("sent %q, want only user_small", got)
+	}
+	if r := l.find(t, slog.LevelError, "too large to send"); r.attrs["limit"] != int64(4<<20) {
+		t.Errorf("log = %v", r)
+	}
+}
+
+// A slow server without BatchIdentify can't finish a chunk within one Timeout; each attempt
+// must still make progress instead of resending the same first items.
+func TestIdentifyFallbackMakesProgressPastTheTimeout(t *testing.T) {
+	sdk := &fakeProfilesSDK{
+		batchErr:      connect.NewError(connect.CodeUnimplemented, errors.New("no such procedure")),
+		identifyDelay: 20 * time.Millisecond,
+	}
+	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{Timeout: 100 * time.Millisecond, Batch: BatchConfig{MaxWait: time.Hour}})
+	for i := range 20 {
+		c.Identify(fmt.Sprintf("user_%02d", i))
+	}
+	for i := 0; i < 30 && len(sdk.calls()) < 20; i++ {
+		_ = c.Flush(t.Context())
+	}
+	seen := map[string]int{}
+	for _, r := range sdk.calls() {
+		seen[r.GetExternalId()]++
+	}
+	if len(seen) != 20 {
+		t.Errorf("delivered %d distinct users, want 20; logs %v", len(seen), l.records)
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("%s delivered %d times, want once", id, n)
+		}
 	}
 }
 

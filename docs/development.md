@@ -114,9 +114,9 @@ The contract matches sdk-node; these are the places the Go port deliberately dif
   sends nothing, so `Close` can't outlive its `ctx` waiting on one.
 - **Every drop is logged**, whether or not `OnError` is set; `OnError` receives the events or
   identifies too.
-- **Byte-aware chunks.** Requests are also cut at 4 MiB, and an event that alone exceeds it is
-  dropped at `Track`: the server refuses bodies over 8 MiB with a transient code, so an
-  oversized batch would otherwise retry forever.
+- **Byte-aware chunks.** Requests are also cut at 4 MiB, and an event or identify that alone
+  exceeds it is dropped at `Track` or `Identify`: the server refuses bodies over 8 MiB with a
+  transient code, so an oversized batch would otherwise retry forever.
 - **`MaxQueueSize` holds after a retry**, too: re-queued events that overflow it drop the oldest.
 - **Invalid UTF-8.** protobuf-go refuses to marshal it, failing a whole batch, so property
   strings and keys are repaired with U+FFFD and a non-UTF-8 `distinctID` is rejected.
@@ -140,6 +140,8 @@ The contract matches sdk-node; these are the places the Go port deliberately dif
 - **Queued `Identify`.** sdk-node awaits the `Identify` RPC. Here `Identify` returns at once, and
   identifies are sent in batches with `BatchIdentify`; a server that answers `Unimplemented` (one
   older than `BatchIdentify`) gets one `Identify` call per item for the rest of the client's life.
+  Those calls share the chunk's `Timeout`, so a slow server may not finish a chunk; the sink
+  reports the delivered prefix (`ingest.PartialSendError`) and the next attempt resumes after it.
   `OnError` receives undeliverable identifies through `Undelivered.Identifies`; sdk-node's covers
   events only.
 - **Bad session IDs.** A `WithSessionID` that isn't a hyphenated UUID is ignored with a warning,

@@ -24,7 +24,23 @@ const (
 	// so an oversized batch would be retried forever. Half the cap leaves room for the
 	// request envelope.
 	maxBatchBytes = 4 << 20
+
+	// MaxItemBytes is the largest item a Batcher can deliver. A bigger one would go out alone
+	// and be refused with a transient code forever, holding up everything queued behind it, so
+	// callers drop it before it is enqueued.
+	MaxItemBytes = maxBatchBytes
 )
+
+// PartialSendError is a Sink's report that a send delivered the chunk's first Sent items
+// before failing with Err. The Batcher then retries or dead-letters only the rest.
+type PartialSendError struct {
+	Sent int
+	Err  error
+}
+
+func (e *PartialSendError) Error() string { return e.Err.Error() }
+
+func (e *PartialSendError) Unwrap() error { return e.Err }
 
 var (
 	// ErrClosed is reported to OnError for events that arrived after Close or were still
@@ -257,6 +273,11 @@ func (b *Batcher[T]) flushOnce() {
 	chunks := b.split(batch)
 	for i, chunk := range chunks {
 		err := b.sendChunk(chunk)
+		if p, ok := errors.AsType[*PartialSendError](err); ok && p.Sent > 0 && p.Sent < len(chunk) {
+			// The delivered prefix is done; only the rest is retried or dead-lettered.
+			chunk = chunk[p.Sent:]
+			chunks[i] = chunk
+		}
 		switch {
 		case err == nil:
 			continue
