@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -73,3 +75,8 @@ func newLogs() (*logs, Logger) {
 	l := &logs{}
 	return l, Logger{slog.New(l)}
 }
+
+// sinkFunc adapts a function to a Sink of any item type.
+type sinkFunc[T proto.Message] func(ctx context.Context, items []T) error
+
+func (f sinkFunc[T]) Send(ctx context.Context, items []T) error { return f(ctx, items) }

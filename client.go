@@ -91,7 +91,7 @@ type Client struct {
 
 	rpc     rpcClients
 	events  ingest.Builder
-	queue   *ingest.Batcher
+	queue   *ingest.Batcher[*eventsv1.Event]
 	log     ingest.Logger
 	timeout time.Duration
 	closed  atomic.Bool
@@ -140,7 +140,7 @@ func newClient(rpc rpcClients, opts Options, sessionID string) *Client {
 	if opts.OnError != nil {
 		onError = func(err error, events []*Event) { opts.OnError(sendError(err), events) }
 	}
-	c.queue = ingest.NewBatcher(eventSink{client: rpc.events, log: log}, ingest.BatchConfig(opts.Batch), onError, log, timeout)
+	c.queue = ingest.NewBatcher[*eventsv1.Event](eventSink{client: rpc.events, log: log}, ingest.BatchConfig(opts.Batch), onError, log, timeout, ingest.EventItems)
 	c.Profiles = &ProfilesClient{c}
 	c.Activity = &ActivityClient{c}
 	c.Insights = &InsightsClient{c}
