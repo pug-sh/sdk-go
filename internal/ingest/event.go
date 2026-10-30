@@ -2,7 +2,6 @@ package ingest
 
 import (
 	"bytes"
-	"cmp"
 	"encoding"
 	"encoding/json"
 	"errors"
@@ -138,6 +137,14 @@ func (b Builder) newEvent(kind, distinctID, source string, custom map[string]*co
 		"$platform":   stringValue(log, platform),
 	}
 	locationProperties(log, kind, o.Location, auto)
+	session := b.SessionID
+	if o.SessionID != "" {
+		if validSessionID(o.SessionID) {
+			session = o.SessionID
+		} else {
+			log.Warn("WithSessionID must be a UUID; using the client's session", "kind", kind)
+		}
+	}
 	ev := &eventsv1.Event{
 		EventId:          proto.String(id.String()),
 		AutoProperties:   auto,
@@ -145,7 +152,7 @@ func (b Builder) newEvent(kind, distinctID, source string, custom map[string]*co
 		DistinctId:       proto.String(distinctID),
 		Kind:             proto.String(kind),
 		OccurTime:        occurTime(log, o),
-		SessionId:        proto.String(cmp.Or(o.SessionID, b.SessionID)),
+		SessionId:        proto.String(session),
 	}
 	if err := protovalidate.GlobalValidator.Validate(ev); err != nil {
 		log.Error("event dropped: failed validation", "kind", kind, "source", source, "violations", Violations(err))
@@ -224,6 +231,12 @@ func hintProtoNames(log Logger, kind string, fields protoreflect.FieldDescriptor
 			log.Warn("property is not a field; did you mean its JSON name?", "kind", kind, "property", k, "json_name", fd.JSONName())
 		}
 	}
+}
+
+// The session_id rule takes only the hyphenated form; uuid.Validate also accepts braced, urn:
+// and hyphenless ones.
+func validSessionID(id string) bool {
+	return len(id) == 36 && uuid.Validate(id) == nil
 }
 
 func knownProperties(log Logger, msg protoreflect.Message, out map[string]*commonv1.PropertyValue) {
