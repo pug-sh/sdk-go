@@ -25,7 +25,7 @@ func Example() {
 
 	client.Track("user_42", "order.completed", pug.Float("amount", 49.0), pug.String("currency", "USD"))
 	client.TrackWellKnown("user_42", &commoneventsv1.FeatureUsedProperties{FeatureId: proto.String("export")})
-	client.Identify(ctx, "user_42", pug.Email("ada@example.com"), pug.String("plan", "pro"))
+	client.Identify("user_42", pug.Email("ada@example.com"), pug.String("plan", "pro"))
 
 	profile, err := client.Profiles.GetByExternalID(ctx, "user_42")
 	if err != nil {
@@ -70,8 +70,8 @@ func ExampleClient_TrackWellKnown() {
 func ExampleClient_Close() {
 	client, _ := pug.New(pug.Options{
 		APIKey: os.Getenv("PUG_API_KEY"),
-		OnError: func(err error, events []*pug.Event) {
-			log.Printf("dropping %d event(s): %v", len(events), err)
+		OnError: func(err error, lost pug.Undelivered) {
+			log.Printf("dropping %d event(s) and %d identify(s): %v", len(lost.Events), len(lost.Identifies), err)
 		},
 	})
 

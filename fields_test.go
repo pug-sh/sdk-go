@@ -116,11 +116,12 @@ func TestIdentifyTakesTraitFields(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
 	since := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	c.Identify(t.Context(), "user_1",
+	c.Identify("user_1",
 		Name("Ada Lovelace"), FirstName("Ada"), LastName("Lovelace"), Email("ada@example.com"), Avatar("https://example.com/a.png"),
 		String("plan", "pro"), Int("seats", 3), Bool("trial", true), Duration("tenure", 90*time.Second), Time("since", since),
 		Traits{"tags": []string{"a"}}, WithAnonymousID("anon-1"))
-	reqs := sdk.calls()
+	_ = c.Flush(t.Context())
+	reqs := sdk.sentIdentifies()
 	if len(reqs) != 1 {
 		t.Fatalf("got %d identify calls; logs %v", len(reqs), l.records)
 	}
@@ -145,8 +146,9 @@ func TestIdentifyTakesTraitFields(t *testing.T) {
 func TestNamedTraitWithEmptyValueIsOmitted(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-	c.Identify(t.Context(), "user_1", Email(""), FirstName("Ada"))
-	traits := sdk.calls()[0].GetTraits().AsMap()
+	c.Identify("user_1", Email(""), FirstName("Ada"))
+	_ = c.Flush(t.Context())
+	traits := sdk.sentIdentifies()[0].GetTraits().AsMap()
 	if _, ok := traits["email"]; ok || traits["firstName"] != "Ada" {
 		t.Errorf("traits = %v, want firstName and no email", traits)
 	}
@@ -155,9 +157,10 @@ func TestNamedTraitWithEmptyValueIsOmitted(t *testing.T) {
 func TestLaterTraitWins(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-	c.Identify(t.Context(), "user_1", FirstName("Ada"), String("firstName", "Grace"))
-	c.Identify(t.Context(), "user_2", String("firstName", "Grace"), FirstName("Ada"))
-	reqs := sdk.calls()
+	c.Identify("user_1", FirstName("Ada"), String("firstName", "Grace"))
+	c.Identify("user_2", String("firstName", "Grace"), FirstName("Ada"))
+	_ = c.Flush(t.Context())
+	reqs := sdk.sentIdentifies()
 	if len(reqs) != 2 {
 		t.Fatalf("got %d identify calls", len(reqs))
 	}
@@ -172,8 +175,9 @@ func TestLaterTraitWins(t *testing.T) {
 func TestNonFiniteTraitIsSkipped(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-	c.Identify(t.Context(), "user_1", Float("score", math.NaN()), String("plan", "pro"))
-	reqs := sdk.calls()
+	c.Identify("user_1", Float("score", math.NaN()), String("plan", "pro"))
+	_ = c.Flush(t.Context())
+	reqs := sdk.sentIdentifies()
 	if len(reqs) != 1 {
 		t.Fatalf("got %d identify calls; a non-finite trait should cost only itself; logs %v", len(reqs), l.records)
 	}
@@ -192,11 +196,12 @@ func TestNonFiniteTraitLeavesTheCallersMapAlone(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
 	traits := Traits{"score": math.NaN(), "plan": "pro"}
-	c.Identify(t.Context(), "user_1", traits)
+	c.Identify("user_1", traits)
+	_ = c.Flush(t.Context())
 	if _, ok := traits["score"]; !ok || len(traits) != 2 {
 		t.Errorf("the caller's map was written to: %v", traits)
 	}
-	if got := sdk.calls()[0].GetTraits().AsMap(); got["plan"] != "pro" || got["score"] != nil {
+	if got := sdk.sentIdentifies()[0].GetTraits().AsMap(); got["plan"] != "pro" || got["score"] != nil {
 		t.Errorf("traits = %v, want plan and no score", got)
 	}
 }

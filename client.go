@@ -47,9 +47,8 @@ type Options struct {
 	Endpoint string
 	// Batch tunes the ingestion buffer.
 	Batch BatchConfig
-	// OnError receives buffered events that could not be delivered: a permanent send failure,
-	// a queue overflow, or events still undelivered at Close. Identify failures are logged,
-	// not routed here.
+	// OnError receives queued events and identifies that could not be delivered: a permanent
+	// send failure, a queue overflow, or ones still undelivered at Close.
 	OnError OnError
 	// Logger receives the SDK's warnings and errors. Defaults to slog.Default().
 	Logger *slog.Logger
@@ -59,7 +58,8 @@ type Options struct {
 	Timeout time.Duration
 }
 
-// BatchConfig tunes the ingestion buffer. Zero fields take their defaults.
+// BatchConfig tunes the ingestion buffers. Events and identifies each get a buffer with these
+// settings. Zero fields take their defaults.
 type BatchConfig struct {
 	// MaxSize is the buffered-event count that triggers a send, and the most events sent in
 	// one request. Defaults to 100; capped at 1000.
@@ -72,14 +72,23 @@ type BatchConfig struct {
 	MaxQueueSize int
 }
 
-// OnError is a dead-letter hook for buffered events that could not be delivered. err matches
-// [ErrQueueOverflow] or [ErrClosed] under [errors.Is], or is an [*Error] for a failed send. It
-// runs on the goroutine that called Track or on the background sender, so it must be safe for
-// concurrent use, return promptly, and not call Flush or Close.
-type OnError func(err error, events []*Event)
+// OnError is a dead-letter hook for queued events and identifies that could not be delivered.
+// err matches [ErrQueueOverflow] or [ErrClosed] under [errors.Is], or is an [*Error] for a
+// failed send. It runs on the goroutine that called Track or Identify or on a background
+// sender, so it must be safe for concurrent use, return promptly, and not call Flush or Close.
+type OnError func(err error, lost Undelivered)
+
+// Undelivered is what one failure lost. Either slice may be empty.
+type Undelivered struct {
+	Events     []*Event
+	Identifies []*Identify
+}
 
 // Event is the wire form of a tracked event, as handed to [OnError].
 type Event = eventsv1.Event
+
+// Identify is the wire form of a queued identify, as handed to [OnError].
+type Identify = sdkprofilesv1.IdentifyRequest
 
 // Client is a Pug server-side client, safe for concurrent use. Ingestion is buffered and
 // sent by a background goroutine, so call [Client.Close] on shutdown.
@@ -91,12 +100,13 @@ type Client struct {
 	// Insights runs analytics queries.
 	Insights *InsightsClient
 
-	rpc     rpcClients
-	events  ingest.Builder
-	queue   *ingest.Batcher[*eventsv1.Event]
-	log     ingest.Logger
-	timeout time.Duration
-	closed  atomic.Bool
+	rpc        rpcClients
+	events     ingest.Builder
+	queue      *ingest.Batcher[*Event]
+	identifies *ingest.Batcher[*Identify]
+	log        ingest.Logger
+	timeout    time.Duration
+	closed     atomic.Bool
 }
 
 // New returns a Client. It fails only on unusable options: a missing, malformed or non-private
@@ -138,11 +148,16 @@ func newClient(rpc rpcClients, opts Options, sessionID string) *Client {
 	}
 	c := &Client{rpc: rpc, log: log, timeout: timeout}
 	c.events = ingest.Builder{Log: log, SessionID: sessionID, Version: Version}
-	var onError func(error, []*Event)
-	if opts.OnError != nil {
-		onError = func(err error, events []*Event) { opts.OnError(sendError(err), events) }
+	// Resolved once, so a bad setting warns once rather than once per queue.
+	batch := ingest.BatchConfig(opts.Batch).Resolve(log)
+	var onEvents func(error, []*Event)
+	var onIdentifies func(error, []*Identify)
+	if onError := opts.OnError; onError != nil {
+		onEvents = func(err error, events []*Event) { onError(sendError(err), Undelivered{Events: events}) }
+		onIdentifies = func(err error, identifies []*Identify) { onError(sendError(err), Undelivered{Identifies: identifies}) }
 	}
-	c.queue = ingest.NewBatcher[*eventsv1.Event](eventSink{client: rpc.events, log: log}, ingest.BatchConfig(opts.Batch), onError, log, timeout, ingest.EventItems)
+	c.queue = ingest.NewBatcher[*Event](eventSink{client: rpc.events, log: log}, batch, onEvents, log, timeout, ingest.EventItems)
+	c.identifies = ingest.NewBatcher[*Identify](&identifySink{client: rpc.profilesSDK, log: log}, batch, onIdentifies, log, timeout, ingest.IdentifyItems)
 	c.Profiles = &ProfilesClient{c}
 	c.Activity = &ActivityClient{c}
 	c.Insights = &InsightsClient{c}
@@ -218,11 +233,13 @@ func (c *Client) accept(distinctID, kind string) bool {
 	return false
 }
 
-// Identify creates or updates the profile for externalID, shallow-merging its traits into the
-// stored properties. Traits are fields (String, Int, …), named traits (Name, FirstName,
-// LastName, Email, Avatar) and Traits maps, in the same list as the With… options. It blocks
-// until the server answers. It never fails: invalid input and request failures are logged.
-func (c *Client) Identify(ctx context.Context, externalID string, opts ...IdentifyOption) {
+// Identify queues a create-or-update of the profile for externalID and returns at once; a
+// background goroutine sends identifies in batches with BatchIdentify, or with one Identify
+// call each on a server that predates it. Its traits are fields (String, Int, …), named traits
+// (Name, FirstName, LastName, Email, Avatar) and Traits maps, in the same list as the With…
+// options, and are shallow-merged into the stored properties. It never fails: invalid input is
+// logged and dropped, and an identify that can't be delivered is reported to OnError.
+func (c *Client) Identify(externalID string, opts ...IdentifyOption) {
 	defer c.recoverPanic("Identify")
 	if c.closed.Load() {
 		c.log.Warn("Identify called after Close; dropped")
@@ -257,11 +274,7 @@ func (c *Client) Identify(ctx context.Context, externalID string, opts ...Identi
 		c.log.Error("invalid identify request", "violations", ingest.Violations(err))
 		return
 	}
-	ctx, cancel := c.withTimeout(ctx)
-	defer cancel()
-	if _, err := c.rpc.profilesSDK.Identify(ctx, connect.NewRequest(req)); err != nil {
-		c.log.Error("identify failed", "external_id", externalID, "err", err)
-	}
+	c.identifies.Enqueue(req)
 }
 
 // dropNonFinite returns traits without their top-level NaN or ±Inf values, which would
@@ -304,21 +317,33 @@ func toStruct(traits Traits) (*structpb.Struct, error) {
 	return s, nil
 }
 
-// Flush sends the buffered events now. It returns once an attempt in progress and its own
-// attempt have finished, or with ctx's error if ctx ends first. It does not guarantee an empty
-// queue: a transient failure keeps events queued for a later retry. Use Close to drain on
-// shutdown.
+// Flush sends the queued events and identifies now. It returns once an attempt in progress and
+// its own attempt have finished, or with ctx's error if ctx ends first. It does not guarantee
+// empty queues: a transient failure keeps items queued for a later retry. Use Close to drain
+// on shutdown.
 func (c *Client) Flush(ctx context.Context) error {
-	return c.queue.Flush(ctx)
+	return both(ctx, c.queue.Flush, c.identifies.Flush)
 }
 
-// Close drains the buffer and stops the background sender; later Track and Identify calls
-// are dropped with a warning. Events that cannot be delivered, including any left when ctx
-// ends, are reported to OnError. It returns ctx's error if ctx ended before the drain
-// finished.
+// Close drains both queues and stops their background senders; later Track and Identify calls
+// are dropped with a warning. Events and identifies that cannot be delivered, including any
+// left when ctx ends, are reported to OnError. It returns ctx's error if ctx ended before the
+// drain finished.
 func (c *Client) Close(ctx context.Context) error {
 	c.closed.Store(true)
-	return c.queue.Close(ctx)
+	return both(ctx, c.queue.Close, c.identifies.Close)
+}
+
+// both runs the event and identify queues' step concurrently and returns the events error,
+// else the identifies one.
+func both(ctx context.Context, events, identifies func(context.Context) error) error {
+	errc := make(chan error, 1)
+	go func() { errc <- identifies(ctx) }()
+	err := events(ctx)
+	if ierr := <-errc; err == nil {
+		err = ierr
+	}
+	return err
 }
 
 func (c *Client) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -390,6 +415,37 @@ func (s eventSink) Send(ctx context.Context, events []*eventsv1.Event) error {
 	// A refused event isn't an RPC error, so this is the only sign it was lost.
 	if dropped := res.Msg.GetDropped(); dropped > 0 {
 		s.log.Warn("server dropped events", "dropped", dropped, "sent", len(events), "reasons", res.Msg.GetDroppedByReason())
+	}
+	return nil
+}
+
+// identifySink sends queued identifies with BatchIdentify, or with one Identify call each on a
+// server that predates it.
+type identifySink struct {
+	client    sdkprofilesv1connect.ProfilesSDKServiceClient
+	log       ingest.Logger
+	unbatched atomic.Bool // the server has no BatchIdentify
+}
+
+func (s *identifySink) Send(ctx context.Context, items []*Identify) error {
+	if !s.unbatched.Load() {
+		_, err := s.client.BatchIdentify(ctx, connect.NewRequest(&sdkprofilesv1.BatchIdentifyRequest{Identifies: items}))
+		// A server without the route answers 404, which Connect reads as Unimplemented. This has
+		// to be caught here: the batcher treats Unimplemented as permanent and would drop the
+		// identifies.
+		if connect.CodeOf(err) != connect.CodeUnimplemented {
+			return err
+		}
+		if s.unbatched.CompareAndSwap(false, true) {
+			s.log.Warn("server has no BatchIdentify; sending identifies one at a time")
+		}
+	}
+	// On a failure partway through, the retry resends the items before it; the server's
+	// identify worker tolerates repeats.
+	for _, item := range items {
+		if _, err := s.client.Identify(ctx, connect.NewRequest(item)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
