@@ -22,8 +22,8 @@ commit, the same commit and allowlist as sdk-node. See the `Makefile`:
 
 | Command             | What it does                                                                                                                           |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `make sync-protos`  | `buf export buf.build/pugsh/pug:$(PROTO_COMMIT)` (read-only) → `proto/` mirror, allowlisted to the SDK packages (incl. the server-only `shared/**`). Needs BSR network. |
-| `make protos`       | `buf generate` → `gen/`. Offline.                                                                                                      |
+| `make sync-protos`  | `buf export buf.build/pugsh/pug:$(PROTO_COMMIT)` (read-only) into the `proto/` mirror, allowlisted to the SDK packages (incl. the server-only `shared/**`). Needs BSR network. |
+| `make protos`       | `buf generate` into `gen/`. Offline.                                                                                                      |
 | `make proto-latest` | Print the newest commit on the module's `main` branch (to bump `PROTO_COMMIT`).                                                        |
 
 `PROTO_COMMIT` normally moves in lockstep with sdk-node, sdk-flutter, sdk-android, sdk-ruby and
@@ -56,7 +56,7 @@ takes.
   `(common.events.v1.platforms)` option contains `PLATFORM_SERVER` **or** is unset. Events
   tagged only with web/mobile/desktop platforms are custom events to this SDK, and
   `TrackWellKnown` refuses their messages.
-- `internal/ingest/testdata/well_known_events.golden` lists the catalog (`kind` → message). A
+- `internal/ingest/testdata/well_known_events.golden` lists the catalog (`kind` to message). A
   proto sync that adds, drops or re-targets an event fails `TestWellKnownCatalogMatchesGolden`;
   review the change and accept it with
   `go test ./internal/ingest -run TestWellKnownCatalogMatchesGolden -update`.
@@ -114,9 +114,11 @@ The contract matches sdk-node; these are the places the Go port deliberately dif
   sends nothing, so `Close` can't outlive its `ctx` waiting on one.
 - **Every drop is logged**, whether or not `OnError` is set; `OnError` receives the events or
   identifies too.
-- **Byte-aware chunks.** Requests are also cut at 4 MiB, and an event or identify that alone
-  exceeds it is dropped at `Track` or `Identify`: the server refuses bodies over 8 MiB with a
-  transient code, so an oversized batch would otherwise retry forever.
+- **Byte-aware chunks.** Requests are also cut at 4 MiB, and an event that alone exceeds it is
+  dropped at `Track`: the server refuses bodies over 8 MiB with a transient code, so an
+  oversized batch would otherwise retry forever. An identify over 900 KiB is dropped at
+  `Identify`: one identify can't be split across NATS messages, and NATS refuses a message over
+  its default 1 MiB however small the request.
 - **`MaxQueueSize` holds after a retry**, too: re-queued events that overflow it drop the oldest.
 - **Invalid UTF-8.** protobuf-go refuses to marshal it, failing a whole batch, so property
   strings and keys are repaired with U+FFFD and a non-UTF-8 `distinctID` is rejected.

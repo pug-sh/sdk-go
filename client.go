@@ -274,8 +274,8 @@ func (c *Client) Identify(externalID string, opts ...IdentifyOption) {
 		c.log.Error("invalid identify request", "violations", ingest.Violations(err))
 		return
 	}
-	if size := proto.Size(req); size > ingest.MaxItemBytes {
-		c.log.Error("identify dropped: too large to send", "bytes", size, "limit", ingest.MaxItemBytes)
+	if size := proto.Size(req); size > ingest.MaxIdentifyBytes {
+		c.log.Error("identify dropped: too large to send", "bytes", size, "limit", ingest.MaxIdentifyBytes)
 		return
 	}
 	c.identifies.Enqueue(req)

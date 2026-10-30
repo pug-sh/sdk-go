@@ -447,18 +447,19 @@ func TestOnErrorReceivesUndeliverableIdentifies(t *testing.T) {
 	}
 }
 
-// The server refuses bodies over 8 MiB with a transient code, so a queued oversized identify
-// would be retried forever, holding up every identify behind it.
+// One identify can't be split across NATS messages and NATS refuses a message over its default
+// 1 MiB, so a 2 MiB identify fits a request and still can never be delivered. Queued, it would
+// fail every send of its chunk.
 func TestOversizedIdentifyIsDroppedWithoutBlockingTheQueue(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-	c.Identify("user_big", Traits{"blob": strings.Repeat("x", 5<<20)})
+	c.Identify("user_big", Traits{"blob": strings.Repeat("x", 2<<20)})
 	c.Identify("user_small")
 	_ = c.Flush(t.Context())
 	if got := externalIDs(sdk.sentIdentifies()); got != "user_small" {
 		t.Errorf("sent %q, want only user_small", got)
 	}
-	if r := l.find(t, slog.LevelError, "too large to send"); r.attrs["limit"] != int64(4<<20) {
+	if r := l.find(t, slog.LevelError, "too large to send"); r.attrs["limit"] != int64(900<<10) {
 		t.Errorf("log = %v", r)
 	}
 }

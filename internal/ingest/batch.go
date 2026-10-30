@@ -25,10 +25,12 @@ const (
 	// request envelope.
 	maxBatchBytes = 4 << 20
 
-	// MaxItemBytes is the largest item a Batcher can deliver. A bigger one would go out alone
-	// and be refused with a transient code forever, holding up everything queued behind it, so
-	// callers drop it before it is enqueued.
-	MaxItemBytes = maxBatchBytes
+	// MaxIdentifyBytes is the largest identify the server can deliver. One identify can't be
+	// split across NATS messages and NATS refuses a message over its default 1 MiB, so a bigger
+	// one fails every send, with a transient code on an older server and otherwise a permanent
+	// one that dead-letters its whole chunk. Callers drop it before it is enqueued; the margin
+	// under 1 MiB leaves room for the server's envelope and trace headers.
+	MaxIdentifyBytes = 900 << 10
 )
 
 // PartialSendError is a Sink's report that a send delivered the chunk's first Sent items
