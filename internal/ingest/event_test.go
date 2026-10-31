@@ -1,4 +1,4 @@
-package pug
+package ingest
 
 import (
 	"encoding/json"
@@ -24,15 +24,24 @@ import (
 	eventsv1 "github.com/pug-sh/sdk-go/gen/sdk/events/v1"
 )
 
-func track(t *testing.T, kind string, opts ...TrackOption) (*eventsv1.Event, *logs) {
-	t.Helper()
-	l, log := newLogs()
-	return toEvent(log, kind, testSession, "user_1", trackOpts(opts)), l
+func testBuilder(log Logger) Builder {
+	return Builder{Log: log, SessionID: testSession, Version: testVersion}
 }
 
-func mustTrack(t *testing.T, kind string, opts ...TrackOption) (*eventsv1.Event, *logs) {
+// track builds an event as Client.Track does; opts, if given, holds the one event's Options.
+func track(t *testing.T, kind string, props Properties, opts ...Options) (*eventsv1.Event, *logs) {
 	t.Helper()
-	ev, l := track(t, kind, opts...)
+	var o Options
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	l, log := newLogs()
+	return testBuilder(log).Build(kind, "user_1", props, o), l
+}
+
+func mustTrack(t *testing.T, kind string, props Properties, opts ...Options) (*eventsv1.Event, *logs) {
+	t.Helper()
+	ev, l := track(t, kind, props, opts...)
 	if ev == nil {
 		t.Fatalf("event dropped; logs: %v", l.records)
 	}
@@ -87,18 +96,18 @@ func TestCustomEventMapsPropertyTypes(t *testing.T) {
 }
 
 func TestEventCarriesSDKAutoProperties(t *testing.T) {
-	ev, _ := mustTrack(t, "my.custom")
+	ev, _ := mustTrack(t, "my.custom", nil)
 	ap := ev.GetAutoProperties()
 	if got := keys(ap); !slices.Equal(got, []string{"$lib", "$platform", "$sdkVersion"}) {
 		t.Fatalf("auto properties = %v", got)
 	}
-	if strOf(t, ap["$lib"]) != "pug-go" || strOf(t, ap["$platform"]) != "server" || strOf(t, ap["$sdkVersion"]) != Version {
+	if strOf(t, ap["$lib"]) != "pug-go" || strOf(t, ap["$platform"]) != "server" || strOf(t, ap["$sdkVersion"]) != testVersion {
 		t.Errorf("auto properties = %v", ap)
 	}
 }
 
 func TestEventFailingValidationIsDropped(t *testing.T) {
-	ev, l := track(t, "my.custom", WithSessionID("not-a-uuid"))
+	ev, l := track(t, "my.custom", nil, Options{SessionID: "not-a-uuid"})
 	if ev != nil {
 		t.Fatal("want the event dropped")
 	}
@@ -109,7 +118,7 @@ func TestEventFailingValidationIsDropped(t *testing.T) {
 }
 
 func TestEmptySessionIDKeepsTheDefault(t *testing.T) {
-	ev, _ := mustTrack(t, "my.custom", WithSessionID(""))
+	ev, _ := mustTrack(t, "my.custom", nil, Options{SessionID: ""})
 	if ev.GetSessionId() != testSession {
 		t.Errorf("session = %q", ev.GetSessionId())
 	}
@@ -122,7 +131,7 @@ func TestDollarPrefixedCustomKeyDropsTheEvent(t *testing.T) {
 }
 
 func TestKindOutsideTheCharsetDropsTheEvent(t *testing.T) {
-	if ev, _ := track(t, "order completed"); ev != nil {
+	if ev, _ := track(t, "order completed", nil); ev != nil {
 		t.Fatal("want the event dropped")
 	}
 }
@@ -194,20 +203,20 @@ func TestCustomValuesMapByGoType(t *testing.T) {
 		"float":      doubleValue(10),
 		"float32":    doubleValue(0.5),
 		"uint8":      intValue(7),
-		"named":      stringValue(logger{}, "pro"),
+		"named":      stringValue(Logger{}, "pro"),
 		"namedInt":   intValue(3),
-		"ptr":        stringValue(logger{}, "ada"),
-		"duration":   stringValue(logger{}, "1.5s"),
-		"durpb":      stringValue(logger{}, "90s"),
+		"ptr":        stringValue(Logger{}, "ada"),
+		"duration":   stringValue(Logger{}, "1.5s"),
+		"durpb":      stringValue(Logger{}, "90s"),
 		"numInt":     intValue(42),
 		"numFloat":   doubleValue(4.5),
-		"text":       stringValue(logger{}, "id-ab"),
-		"addr":       stringValue(logger{}, "10.0.0.1"),
-		"struct":     stringValue(logger{}, `{"city":"Berlin & <Mitte>"}`),
-		"slice":      stringValue(logger{}, `["a","b"]`),
-		"emptySlice": stringValue(logger{}, `[]`),
-		"bytes":      stringValue(logger{}, "AQID"),
-		"raw":        stringValue(logger{}, `{"a":1}`),
+		"text":       stringValue(Logger{}, "id-ab"),
+		"addr":       stringValue(Logger{}, "10.0.0.1"),
+		"struct":     stringValue(Logger{}, `{"city":"Berlin & <Mitte>"}`),
+		"slice":      stringValue(Logger{}, `["a","b"]`),
+		"emptySlice": stringValue(Logger{}, `[]`),
+		"bytes":      stringValue(Logger{}, "AQID"),
+		"raw":        stringValue(Logger{}, `{"a":1}`),
 	} {
 		if !proto.Equal(cp[key], want) {
 			t.Errorf("%s = %v, want %v", key, cp[key], want)
@@ -301,7 +310,7 @@ func TestWellKnownProtoNameGetsAHint(t *testing.T) {
 
 	l, log := newLogs()
 	refund := &commoneventsv1.OrderRefundedProperties{Amount: proto.Float64(5)}
-	if toWellKnownEvent(log, "order_refunded", testSession, "user_1", refund.ProtoReflect(), trackOptions{props: Properties{"order_id": "o1"}}) != nil {
+	if testBuilder(log).BuildWellKnown("order_refunded", "user_1", refund.ProtoReflect(), Properties{"order_id": "o1"}, Options{}) != nil {
 		t.Fatal("want the typed event dropped")
 	}
 	if r := l.find(t, slog.LevelWarn, "did you mean"); r.attrs["json_name"] != "orderId" {
@@ -479,10 +488,11 @@ func TestTypedEventMatchesTheUntypedOne(t *testing.T) {
 		FromPosition: durationpb.New(5 * time.Second),
 		ToPosition:   durationpb.New(9500 * time.Millisecond),
 	}
-	typed := toWellKnownEvent(log, "video_seeked", testSession, "user_1", msg.ProtoReflect(), trackOptions{props: Properties{"source": "scrubber"}})
-	untyped := toEvent(log, "video_seeked", testSession, "user_1", trackOptions{props: Properties{
+	b := testBuilder(log)
+	typed := b.BuildWellKnown("video_seeked", "user_1", msg.ProtoReflect(), Properties{"source": "scrubber"}, Options{})
+	untyped := b.Build("video_seeked", "user_1", Properties{
 		"videoId": "v1", "fromPosition": 5 * time.Second, "toPosition": 9500 * time.Millisecond, "source": "scrubber",
-	}})
+	}, Options{})
 	if typed == nil || untyped == nil {
 		t.Fatal("event dropped")
 	}
@@ -492,15 +502,15 @@ func TestTypedEventMatchesTheUntypedOne(t *testing.T) {
 }
 
 func TestOccurTime(t *testing.T) {
-	ev, _ := mustTrack(t, "my.custom", WithTimestamp(time.UnixMilli(1_700_000_000_000)))
+	ev, _ := mustTrack(t, "my.custom", nil, Options{Timestamp: time.UnixMilli(1_700_000_000_000), HasTimestamp: true})
 	if got := ev.GetOccurTime().GetSeconds(); got != 1_700_000_000 {
 		t.Errorf("occur time = %d", got)
 	}
-	ev, _ = mustTrack(t, "my.custom", WithTimestamp(time.Unix(0, 0)))
+	ev, _ = mustTrack(t, "my.custom", nil, Options{Timestamp: time.Unix(0, 0), HasTimestamp: true})
 	if got := ev.GetOccurTime().AsTime(); !got.Equal(time.Unix(0, 0)) {
 		t.Errorf("occur time = %v, want the epoch", got)
 	}
-	ev, _ = mustTrack(t, "my.custom", WithTimestamp(time.UnixMilli(1_700_000_000_000).Add(1234*time.Microsecond)))
+	ev, _ = mustTrack(t, "my.custom", nil, Options{Timestamp: time.UnixMilli(1_700_000_000_000).Add(1234 * time.Microsecond), HasTimestamp: true})
 	if got := ev.GetOccurTime().GetNanos(); got != 1_234_000 {
 		t.Errorf("occur nanos = %d", got)
 	}
@@ -509,7 +519,7 @@ func TestOccurTime(t *testing.T) {
 func TestOutOfRangeTimestampFallsBackToNow(t *testing.T) {
 	for _, ts := range []time.Time{{}, time.Unix(-1, 0), time.Unix(1_700_000_000_000, 0)} {
 		before := time.Now().Add(-time.Second)
-		ev, l := mustTrack(t, "my.custom", WithTimestamp(ts))
+		ev, l := mustTrack(t, "my.custom", nil, Options{Timestamp: ts, HasTimestamp: true})
 		if got := ev.GetOccurTime().AsTime(); got.Before(before) || got.After(time.Now().Add(time.Second)) {
 			t.Errorf("%v: occur time = %v, want now", ts, got)
 		}
@@ -519,7 +529,7 @@ func TestOutOfRangeTimestampFallsBackToNow(t *testing.T) {
 
 func location(t *testing.T, loc Location) (*eventsv1.Event, *logs) {
 	t.Helper()
-	return mustTrack(t, "my.custom", WithLocation(loc))
+	return mustTrack(t, "my.custom", nil, Options{Location: &loc})
 }
 
 func TestLocationRendersEveryField(t *testing.T) {
@@ -611,7 +621,7 @@ func TestLocationWithNoUsableFieldWarns(t *testing.T) {
 }
 
 func TestNoLocationWritesNoGeo(t *testing.T) {
-	ev, l := mustTrack(t, "my.custom")
+	ev, l := mustTrack(t, "my.custom", nil)
 	if got := keys(ev.GetAutoProperties()); !slices.Equal(got, []string{"$lib", "$platform", "$sdkVersion"}) {
 		t.Errorf("auto properties = %v", got)
 	}
@@ -698,7 +708,7 @@ func TestCustomValueRefusals(t *testing.T) {
 		"channel":             make(chan int),
 		"unencodable map":     map[string]any{"f": func() {}},
 	} {
-		if pv, err := customValue(logger{}, v); err == nil {
+		if pv, err := customValue(Logger{}, v); err == nil {
 			t.Errorf("%s: got %v, want an error", name, pv)
 		}
 	}

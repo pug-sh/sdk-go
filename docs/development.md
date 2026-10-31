@@ -45,15 +45,17 @@ at startup.
 
 Unlike sdk-node, there is no generated registry: the catalog is read at runtime from the
 `(common.events.v1.kind)` option of the messages in the generated `commoneventsv1` package
-(`wellknown.go`), and the typed messages themselves are what `TrackWellKnown` takes.
+(`internal/ingest/wellknown.go`), and the typed messages themselves are what `TrackWellKnown`
+takes.
 
 - **Filter policy** (same as sdk-node): an event is well-known here if its
   `(common.events.v1.platforms)` option contains `PLATFORM_SERVER` **or** is unset. Events
   tagged only with web/mobile/desktop platforms are custom events to this SDK, and
   `TrackWellKnown` refuses their messages.
-- `testdata/well_known_events.golden` lists the catalog (`kind` → message). A proto sync that
-  adds, drops or re-targets an event fails `TestWellKnownCatalogMatchesGolden`; review the change
-  and accept it with `go test -run TestWellKnownCatalogMatchesGolden -update .`.
+- `internal/ingest/testdata/well_known_events.golden` lists the catalog (`kind` → message). A
+  proto sync that adds, drops or re-targets an event fails `TestWellKnownCatalogMatchesGolden`;
+  review the change and accept it with
+  `go test ./internal/ingest -run TestWellKnownCatalogMatchesGolden -update`.
 
 `Track` looks up the kind in the catalog: known kinds get their properties type-checked against
 the schema (by the fields' JSON names, keeping int-vs-double from the field type) and validated
@@ -77,18 +79,21 @@ release tag (`vX.Y.Z`).
 
 ## Source layout
 
-| File                    | Responsibility                                                                  |
-| ----------------------- | ------------------------------------------------------------------------------- |
-| `client.go`             | `Client`, `Options`, `New`: ingestion (`Track`/`TrackWellKnown`/`Identify`) and lifecycle. |
-| `event.go`              | Builds and validates `Event` protos; maps Go values and typed schemas to `PropertyValue`; location. |
-| `batch.go`              | Batching transport: one sender goroutine, flush triggers, retry, dead-letter.   |
-| `rpc.go`                | Connect clients with the `x-api-key` interceptor; the `BatchCreate` sink.       |
-| `reads.go`              | `Profiles`/`Activity`/`Insights` read facades.                                  |
-| `wellknown.go`          | Well-known event catalog from the proto options.                                |
-| `options.go`            | `Properties`, `Traits`, per-call options, `Location`.                           |
-| `errors.go`             | `Error`, its per-code sentinels, and its normalization from Connect errors.     |
-| `countries.go`          | ISO 3166-1 alpha-2 set, mirroring the server's `internal/geo`.                  |
-| `log.go`, `version.go`  | `slog` wrapper; SDK version.                                                    |
+The root package is the public API only. Everything between `Track` and the wire lives in
+`internal/ingest`, which users can't import, so it can change without a release note.
+
+| File                          | Responsibility                                                            |
+| ----------------------------- | ------------------------------------------------------------------------- |
+| `client.go`                   | `Client`, `Options`, `New`: ingestion (`Track`/`TrackWellKnown`/`Identify`) and lifecycle; Connect clients with the `x-api-key` interceptor; the `BatchCreate` sink. |
+| `options.go`                  | `Properties`, `Traits`, per-call options, `Location`.                     |
+| `reads.go`                    | `Profiles`/`Activity`/`Insights` read facades.                            |
+| `errors.go`                   | `Error`, its per-code sentinels, and its normalization from Connect errors; the `OnError` sentinels. |
+| `doc.go`, `version.go`        | Package docs; SDK version.                                                |
+| `internal/ingest/event.go`    | `Builder`: builds and validates `Event` protos; maps Go values and typed schemas to `PropertyValue`; location. |
+| `internal/ingest/batch.go`    | `Batcher`: one sender goroutine, flush triggers, retry, dead-letter.      |
+| `internal/ingest/wellknown.go`| Well-known event catalog from the proto options.                          |
+| `internal/ingest/countries.go`| ISO 3166-1 alpha-2 set, mirroring the server's `internal/geo`.            |
+| `internal/ingest/log.go`      | `Logger`, the `slog` wrapper that adds the `pug: ` prefix.                |
 
 ## Behaviour notes (vs sdk-node)
 

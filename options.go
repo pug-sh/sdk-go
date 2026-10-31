@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+
+	"github.com/pug-sh/sdk-go/internal/ingest"
 )
 
 // Properties are an event's custom properties, passed to [Client.Track] or
@@ -47,11 +49,9 @@ type trackOption func(*trackOptions)
 func (f trackOption) applyTrack(o *trackOptions) { f(o) }
 
 type trackOptions struct {
-	props        Properties
-	timestamp    time.Time
-	hasTimestamp bool
-	sessionID    string
-	location     *Location
+	ingest.Options
+	// props holds the Properties given among the options, merged in call order.
+	props Properties
 }
 
 func trackOpts(opts []TrackOption) trackOptions {
@@ -70,19 +70,28 @@ func trackOpts(opts []TrackOption) trackOptions {
 // epoch or after year 9999 is almost certainly a unit mistake, so it is ignored with a
 // warning.
 func WithTimestamp(t time.Time) TrackOption {
-	return trackOption(func(o *trackOptions) { o.timestamp, o.hasTimestamp = t, true })
+	return trackOption(func(o *trackOptions) { o.Timestamp, o.HasTimestamp = t, true })
 }
 
 // WithSessionID overrides the client's per-instance session id. It must be a UUID; an empty
 // id keeps the default.
 func WithSessionID(id string) TrackOption {
-	return trackOption(func(o *trackOptions) { o.sessionID = id })
+	return trackOption(func(o *trackOptions) { o.SessionID = id })
 }
 
 // WithLocation records the visitor's location. Pug derives geo only from browser requests, so
 // an event sent with a private key carries the location set here or none at all.
 func WithLocation(loc Location) TrackOption {
-	return trackOption(func(o *trackOptions) { o.location = &loc })
+	// Copied when applied, so Coordinates is still read during Track, as it always was.
+	return trackOption(func(o *trackOptions) {
+		o.Location = &ingest.Location{
+			Continent: loc.Continent, Country: loc.Country, Region: loc.Region, City: loc.City,
+			PostalCode: loc.PostalCode, MetroCode: loc.MetroCode, Timezone: loc.Timezone,
+		}
+		if c := loc.Coordinates; c != nil {
+			o.Location.Coordinates = &ingest.Coordinates{Latitude: c.Latitude, Longitude: c.Longitude}
+		}
+	})
 }
 
 // Location is where the visitor is, for an event your backend sends on their behalf. Strings

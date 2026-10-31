@@ -1,4 +1,4 @@
-package pug
+package ingest
 
 import (
 	"context"
@@ -36,15 +36,24 @@ var (
 	ErrQueueOverflow = errors.New("pug: queue overflow: dropped oldest event")
 )
 
-type sink interface {
-	send(ctx context.Context, events []*eventsv1.Event) error
+// BatchConfig mirrors pug.BatchConfig. Zero fields take their defaults.
+type BatchConfig struct {
+	MaxSize      int
+	MaxWait      time.Duration
+	MaxQueueSize int
 }
 
-// Sends run on a single goroutine, so batches never overlap and go out in order.
-type batcher struct {
-	sink     sink
-	onError  OnError
-	log      logger
+// Sink delivers one batch of events.
+type Sink interface {
+	Send(ctx context.Context, events []*eventsv1.Event) error
+}
+
+// Batcher buffers events and sends them in batches. Sends run on a single goroutine, so
+// batches never overlap and go out in order.
+type Batcher struct {
+	sink     Sink
+	onError  func(err error, events []*eventsv1.Event)
+	log      Logger
 	timeout  time.Duration
 	maxSize  int
 	maxWait  time.Duration
@@ -67,8 +76,10 @@ type batcher struct {
 	timerGen uint64
 }
 
-func newBatcher(s sink, cfg BatchConfig, onError OnError, log logger, timeout time.Duration) *batcher {
-	b := &batcher{
+// NewBatcher starts a Batcher's background sender. onError, if set, receives every event that
+// cannot be delivered.
+func NewBatcher(s Sink, cfg BatchConfig, onError func(err error, events []*eventsv1.Event), log Logger, timeout time.Duration) *Batcher {
+	b := &Batcher{
 		sink:      s,
 		onError:   onError,
 		log:       log,
@@ -83,7 +94,7 @@ func newBatcher(s sink, cfg BatchConfig, onError OnError, log logger, timeout ti
 		closeDone: make(chan struct{}),
 	}
 	if b.maxSize > maxBatchEvents {
-		log.warn("Batch.MaxSize exceeds the 1000-event request cap; clamping", "value", b.maxSize)
+		log.Warn("Batch.MaxSize exceeds the 1000-event request cap; clamping", "value", b.maxSize)
 		b.maxSize = maxBatchEvents
 	}
 	b.sendCtx, b.cancelSends = context.WithCancel(context.Background())
@@ -91,9 +102,9 @@ func newBatcher(s sink, cfg BatchConfig, onError OnError, log logger, timeout ti
 	return b
 }
 
-func batchSetting[T int | time.Duration](log logger, name string, v, def T) T {
+func batchSetting[T int | time.Duration](log Logger, name string, v, def T) T {
 	if v < 0 {
-		log.warn("Batch."+name+" must not be negative; using the default", "value", v, "default", def)
+		log.Warn("Batch."+name+" must not be negative; using the default", "value", v, "default", def)
 	}
 	if v <= 0 {
 		return def
@@ -101,7 +112,7 @@ func batchSetting[T int | time.Duration](log logger, name string, v, def T) T {
 	return v
 }
 
-func (b *batcher) run() {
+func (b *Batcher) run() {
 	defer close(b.stopped)
 	for {
 		select {
@@ -123,11 +134,11 @@ func (b *batcher) run() {
 	}
 }
 
-func (b *batcher) enqueue(ev *eventsv1.Event) {
+func (b *Batcher) Enqueue(ev *eventsv1.Event) {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		b.log.warn("client closed; event dropped")
+		b.log.Warn("client closed; event dropped")
 		b.deadLetter(ErrClosed, []*eventsv1.Event{ev})
 		return
 	}
@@ -142,7 +153,7 @@ func (b *batcher) enqueue(ev *eventsv1.Event) {
 	}
 	b.mu.Unlock()
 	if dropped != nil {
-		b.log.warn("queue full; dropping oldest event")
+		b.log.Warn("queue full; dropping oldest event")
 		b.deadLetter(ErrQueueOverflow, dropped)
 	}
 	if full {
@@ -150,7 +161,7 @@ func (b *batcher) enqueue(ev *eventsv1.Event) {
 	}
 }
 
-func (b *batcher) flush(ctx context.Context) error {
+func (b *Batcher) Flush(ctx context.Context) error {
 	done := make(chan struct{})
 	select {
 	case b.flushes <- done:
@@ -167,7 +178,7 @@ func (b *batcher) flush(ctx context.Context) error {
 	}
 }
 
-func (b *batcher) close(ctx context.Context) error {
+func (b *Batcher) Close(ctx context.Context) error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -182,7 +193,7 @@ func (b *batcher) close(ctx context.Context) error {
 	b.disarmLocked()
 	b.mu.Unlock()
 
-	err := b.flush(ctx)
+	err := b.Flush(ctx)
 	// That was the final attempt. A Flush queued behind it must not send again, or close would
 	// wait out those sends whatever its ctx says.
 	b.mu.Lock()
@@ -197,7 +208,7 @@ func (b *batcher) close(ctx context.Context) error {
 	b.buf = nil
 	b.mu.Unlock()
 	if len(undelivered) > 0 {
-		b.log.error("client closed with undelivered events; dropped", "events", len(undelivered))
+		b.log.Error("client closed with undelivered events; dropped", "events", len(undelivered))
 		b.deadLetter(fmt.Errorf("%w with %d undelivered event(s)", ErrClosed, len(undelivered)), undelivered)
 	}
 	close(b.closeDone)
@@ -207,7 +218,7 @@ func (b *batcher) close(ctx context.Context) error {
 // flushOnce stops at the first transient failure, since the rest would likely fail the same
 // way. Open, the failed and unsent chunks are re-queued in order for a retry after MaxWait;
 // closed, the failed chunk is dead-lettered and the rest left for close to report.
-func (b *batcher) flushOnce() {
+func (b *Batcher) flushOnce() {
 	b.mu.Lock()
 	if b.drained {
 		b.mu.Unlock()
@@ -228,19 +239,19 @@ func (b *batcher) flushOnce() {
 		case err == nil:
 			continue
 		case isPermanent(err):
-			b.log.error("permanent send failure; events dropped", "events", len(chunk), "err", err)
-			b.deadLetter(toError(err), chunk)
+			b.log.Error("permanent send failure; events dropped", "events", len(chunk), "err", err)
+			b.deadLetter(err, chunk)
 			continue
 		}
 		b.mu.Lock()
 		closed := b.closed
 		b.mu.Unlock()
 		if closed {
-			b.log.error("client closed; events dropped after a transient send failure", "events", len(chunk), "err", err)
-			b.deadLetter(toError(err), chunk)
+			b.log.Error("client closed; events dropped after a transient send failure", "events", len(chunk), "err", err)
+			b.deadLetter(err, chunk)
 			b.requeue(slices.Concat(chunks[i+1:]...), false)
 		} else {
-			b.log.warn("transient send failure; will retry", "events", len(chunk), "err", err)
+			b.log.Warn("transient send failure; will retry", "events", len(chunk), "err", err)
 			b.requeue(slices.Concat(chunks[i:]...), true)
 		}
 		return
@@ -250,7 +261,7 @@ func (b *batcher) flushOnce() {
 	b.mu.Unlock()
 }
 
-func (b *batcher) split(batch []*eventsv1.Event) [][]*eventsv1.Event {
+func (b *Batcher) split(batch []*eventsv1.Event) [][]*eventsv1.Event {
 	var chunks [][]*eventsv1.Event
 	start, size := 0, 0
 	for i, ev := range batch {
@@ -264,18 +275,18 @@ func (b *batcher) split(batch []*eventsv1.Event) [][]*eventsv1.Event {
 	return append(chunks, batch[start:])
 }
 
-func (b *batcher) sendChunk(chunk []*eventsv1.Event) (err error) {
+func (b *Batcher) sendChunk(chunk []*eventsv1.Event) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = &Error{Message: fmt.Sprintf("sending batch panicked: %v", r)}
+			err = fmt.Errorf("sending batch panicked: %v", r)
 		}
 	}()
 	ctx, cancel := context.WithTimeout(b.sendCtx, b.timeout)
 	defer cancel()
-	return b.sink.send(ctx, chunk)
+	return b.sink.Send(ctx, chunk)
 }
 
-func (b *batcher) requeue(events []*eventsv1.Event, retry bool) {
+func (b *Batcher) requeue(events []*eventsv1.Event, retry bool) {
 	b.mu.Lock()
 	b.buf = append(events, b.buf...)
 	var dropped []*eventsv1.Event
@@ -290,19 +301,19 @@ func (b *batcher) requeue(events []*eventsv1.Event, retry bool) {
 	}
 	b.mu.Unlock()
 	if dropped != nil {
-		b.log.warn("queue full; dropping oldest events", "events", len(dropped))
+		b.log.Warn("queue full; dropping oldest events", "events", len(dropped))
 		b.deadLetter(ErrQueueOverflow, dropped)
 	}
 }
 
-func (b *batcher) dropOldestLocked(n int) []*eventsv1.Event {
+func (b *Batcher) dropOldestLocked(n int) []*eventsv1.Event {
 	dropped := slices.Clone(b.buf[:n])
 	clear(b.buf[:n])
 	b.buf = b.buf[n:]
 	return dropped
 }
 
-func (b *batcher) armLocked() {
+func (b *Batcher) armLocked() {
 	if b.timer != nil || b.closed {
 		return
 	}
@@ -311,7 +322,7 @@ func (b *batcher) armLocked() {
 	b.timer = time.AfterFunc(b.maxWait, func() { b.timerFired(gen) })
 }
 
-func (b *batcher) disarmLocked() {
+func (b *Batcher) disarmLocked() {
 	if b.timer != nil {
 		b.timer.Stop()
 		b.timer = nil
@@ -319,7 +330,7 @@ func (b *batcher) disarmLocked() {
 	}
 }
 
-func (b *batcher) timerFired(gen uint64) {
+func (b *Batcher) timerFired(gen uint64) {
 	b.mu.Lock()
 	if gen != b.timerGen {
 		b.mu.Unlock()
@@ -331,7 +342,7 @@ func (b *batcher) timerFired(gen uint64) {
 	b.signal()
 }
 
-func (b *batcher) signal() {
+func (b *Batcher) signal() {
 	select {
 	case b.kick <- struct{}{}:
 	default:
@@ -339,13 +350,13 @@ func (b *batcher) signal() {
 }
 
 // A panicking callback must not take down the sender, which would strand every later event.
-func (b *batcher) deadLetter(err error, events []*eventsv1.Event) {
+func (b *Batcher) deadLetter(err error, events []*eventsv1.Event) {
 	if b.onError == nil {
 		return
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			b.log.error("OnError panicked; events may be lost", "events", len(events), "panic", r)
+			b.log.Error("OnError panicked; events may be lost", "events", len(events), "panic", r)
 		}
 	}()
 	b.onError(err, events)

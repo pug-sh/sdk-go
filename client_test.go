@@ -48,7 +48,7 @@ func TestNewAppliesDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close(t.Context())
-	if c.timeout != defaultTimeout || c.sessionID == "" || c.Profiles == nil || c.Activity == nil || c.Insights == nil {
+	if c.timeout != defaultTimeout || c.events.SessionID == "" || c.Profiles == nil || c.Activity == nil || c.Insights == nil {
 		t.Errorf("client = %+v", c)
 	}
 }
@@ -98,19 +98,45 @@ func TestTrackAfterCloseWarnsAndDrops(t *testing.T) {
 func TestTrackCarriesOptionsThroughToTheEvent(t *testing.T) {
 	events := &fakeEvents{}
 	c, _ := newTestClient(t, rpcClients{events: events}, Options{})
-	c.Track("user_1", "my.custom", WithTimestamp(time.Unix(0, 0)), WithLocation(Location{Country: "DE"}))
+	const session = "0190a5a6-0000-7000-8000-000000000002"
+	c.Track("user_1", "my.custom",
+		WithTimestamp(time.Unix(0, 0)),
+		WithSessionID(session),
+		WithLocation(Location{
+			Continent: "EU", Country: "de", Region: "BE", City: "Berlin", PostalCode: "10115",
+			MetroCode: "1", Timezone: "Europe/Berlin", Coordinates: &Coordinates{Latitude: 52.52, Longitude: 13.405},
+		}),
+	)
+	c.Track("user_1", "my.custom", WithSessionID(""))
 	if err := c.Flush(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	sent := events.sent()
-	if len(sent) != 1 {
+	if len(sent) != 2 {
 		t.Fatalf("sent %d events", len(sent))
 	}
-	if got := sent[0].GetAutoProperties()["$country"].GetStringValue(); got != "DE" {
-		t.Errorf("$country = %q", got)
-	}
-	if got := sent[0].GetOccurTime().GetSeconds(); got != 0 {
+	ev := sent[0]
+	if got := ev.GetOccurTime().GetSeconds(); got != 0 {
 		t.Errorf("occur time = %d", got)
+	}
+	if got := ev.GetSessionId(); got != session {
+		t.Errorf("session id = %q, want %q", got, session)
+	}
+	ap := ev.GetAutoProperties()
+	for key, want := range map[string]string{
+		"$lib": "pug-go", "$sdkVersion": Version, "$platform": "server",
+		"$continent": "EU", "$country": "DE", "$region": "BE", "$city": "Berlin",
+		"$postalCode": "10115", "$metroCode": "1", "$timezone": "Europe/Berlin",
+	} {
+		if got := ap[key].GetStringValue(); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if ap["$latitude"].GetDoubleValue() != 52.52 || ap["$longitude"].GetDoubleValue() != 13.405 {
+		t.Errorf("coordinates = %v, %v", ap["$latitude"], ap["$longitude"])
+	}
+	if got := sent[1].GetSessionId(); got != testSession {
+		t.Errorf("default session id = %q, want the client's %q", got, testSession)
 	}
 }
 
@@ -218,12 +244,42 @@ func TestOnErrorReceivesUndeliverableEvents(t *testing.T) {
 	}
 }
 
+// The batcher dead-letters raw errors; OnError gets a failed send as an *Error, like a read's.
+func TestOnErrorReceivesAPanickingSendAsAnError(t *testing.T) {
+	dl := &deadLetters{}
+	c, _ := newTestClient(t, rpcClients{events: &fakeEvents{panicWith: "sink boom"}}, Options{OnError: dl.record})
+	c.Track("user_1", "my.custom")
+	_ = c.Flush(t.Context())
+	got := dl.all()
+	if len(got) != 1 || got[0].err.Error() != "pug: sending batch panicked: sink boom" {
+		t.Fatalf("dead letters = %v", got)
+	}
+	if _, ok := errors.AsType[*Error](got[0].err); !ok {
+		t.Errorf("err = %#v, want an *Error", got[0].err)
+	}
+}
+
+func TestOnErrorReceivesAFailedSendAtCloseAsAnError(t *testing.T) {
+	dl := &deadLetters{}
+	events := &fakeEvents{err: connect.NewError(connect.CodeUnavailable, errors.New("down"))}
+	c, _ := newTestClient(t, rpcClients{events: events}, Options{OnError: dl.record})
+	c.Track("user_1", "my.custom")
+	_ = c.Close(t.Context())
+	got := dl.all()
+	if len(got) != 1 || !errors.Is(got[0].err, ErrUnavailable) {
+		t.Fatalf("dead letters = %v, want one matching ErrUnavailable", got)
+	}
+	if _, ok := errors.AsType[*Error](got[0].err); !ok {
+		t.Errorf("err = %#v, want an *Error", got[0].err)
+	}
+}
+
 func TestServerDroppedEventsAreLogged(t *testing.T) {
 	l, log := newLogs()
 	events := &fakeEvents{res: &eventsv1.BatchCreateResponse{
 		Accepted: proto.Uint32(1), Dropped: proto.Uint32(2), DroppedByReason: map[string]uint32{"day_out_of_range": 2},
 	}}
-	if err := (eventSink{client: events, log: log}).send(t.Context(), []*eventsv1.Event{{}, {}, {}}); err != nil {
+	if err := (eventSink{client: events, log: log}).Send(t.Context(), []*eventsv1.Event{{}, {}, {}}); err != nil {
 		t.Fatal(err)
 	}
 	r := l.find(t, slog.LevelWarn, "server dropped events")

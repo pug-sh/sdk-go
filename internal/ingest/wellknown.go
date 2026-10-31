@@ -1,4 +1,4 @@
-package pug
+package ingest
 
 import (
 	"cmp"
@@ -50,6 +50,13 @@ var wellKnown = sync.OnceValue(func() catalog {
 	}
 	return c
 })
+
+// WellKnownKind returns the kind of the well-known server event whose properties message is
+// named name.
+func WellKnownKind(name protoreflect.FullName) (string, bool) {
+	kind, ok := wellKnown().byName[name]
+	return kind, ok
+}
 
 func forServer(md protoreflect.MessageDescriptor) bool {
 	platforms, _ := proto.GetExtension(md.Options(), commoneventsv1.E_Platforms).([]commoneventsv1.Platform)

@@ -1,4 +1,4 @@
-package pug
+package ingest
 
 import (
 	"bytes"
@@ -47,54 +47,97 @@ var (
 	errUnsupportedField = errors.New("unsupported field type")
 )
 
-// toEvent builds and validates an Event from Track's arguments. It returns nil, having logged
+// Properties are an event's properties, as pug.Properties hands them over.
+type Properties = map[string]any
+
+// Options are one event's settings, set by pug's TrackOptions.
+type Options struct {
+	Timestamp    time.Time
+	HasTimestamp bool
+	SessionID    string
+	Location     *Location
+}
+
+// Location mirrors pug.Location.
+type Location struct {
+	Continent   string
+	Country     string
+	Region      string
+	City        string
+	PostalCode  string
+	MetroCode   string
+	Timezone    string
+	Coordinates *Coordinates
+}
+
+// Coordinates mirrors pug.Coordinates.
+type Coordinates struct {
+	Latitude  float64
+	Longitude float64
+}
+
+// Builder builds the events one client tracks.
+type Builder struct {
+	Log Logger
+	// SessionID is the session of an event that sets none.
+	SessionID string
+	// Version is sent with every event as the $sdkVersion auto-property.
+	Version string
+}
+
+// Build builds and validates an Event from Track's arguments. It returns nil, having logged
 // why, when the event must be dropped.
-func toEvent(log logger, kind, sessionID, distinctID string, o trackOptions) *eventsv1.Event {
-	custom := make(map[string]*commonv1.PropertyValue, len(o.props))
+func (b Builder) Build(kind, distinctID string, props Properties, o Options) *eventsv1.Event {
+	log := b.Log
+	custom := make(map[string]*commonv1.PropertyValue, len(props))
 	source := "custom"
 	if mt, ok := wellKnown().byKind[kind]; ok {
 		source = "well-known"
-		if !wellKnownProperties(log, kind, mt.New(), o.props, custom) {
+		if !wellKnownProperties(log, kind, mt.New(), props, custom) {
 			return nil
 		}
 	} else {
-		customProperties(log, kind, o.props, custom)
+		customProperties(log, kind, props, custom)
 	}
-	return newEvent(log, kind, sessionID, distinctID, source, custom, o)
+	return b.newEvent(kind, distinctID, source, custom, o)
 }
 
-func toWellKnownEvent(log logger, kind, sessionID, distinctID string, msg protoreflect.Message, o trackOptions) *eventsv1.Event {
+// BuildWellKnown is Build for TrackWellKnown's typed properties message, whose kind the
+// caller has already looked up.
+func (b Builder) BuildWellKnown(kind, distinctID string, msg protoreflect.Message, extras Properties, o Options) *eventsv1.Event {
+	log := b.Log
 	fields := msg.Descriptor().Fields()
-	hintProtoNames(log, kind, fields, o.props)
+	hintProtoNames(log, kind, fields, extras)
 	if !validProperties(log, kind, msg.Interface()) {
 		return nil
 	}
-	custom := make(map[string]*commonv1.PropertyValue, fields.Len()+len(o.props))
+	custom := make(map[string]*commonv1.PropertyValue, fields.Len()+len(extras))
 	knownProperties(log, msg, custom)
-	rest := make(Properties, len(o.props))
-	for k, v := range o.props {
+	rest := make(Properties, len(extras))
+	for k, v := range extras {
 		if fields.ByJSONName(k) != nil {
-			log.warn("extra property shares a typed field's name; skipping", "kind", kind, "property", k)
+			log.Warn("extra property shares a typed field's name; skipping", "kind", kind, "property", k)
 			continue
 		}
 		rest[k] = v
 	}
 	customProperties(log, kind, rest, custom)
-	return newEvent(log, kind, sessionID, distinctID, "well-known", custom, o)
+	return b.newEvent(kind, distinctID, "well-known", custom, o)
 }
 
-func newEvent(log logger, kind, sessionID, distinctID, source string, custom map[string]*commonv1.PropertyValue, o trackOptions) *eventsv1.Event {
+func (b Builder) newEvent(kind, distinctID, source string, custom map[string]*commonv1.PropertyValue, o Options) *eventsv1.Event {
+	log := b.Log
 	id, err := uuid.NewV7()
 	if err != nil {
-		log.error("event dropped: generating an event id failed", "kind", kind, "err", err)
+		log.Error("event dropped: generating an event id failed", "kind", kind, "err", err)
 		return nil
 	}
 	auto := map[string]*commonv1.PropertyValue{
 		"$lib":        stringValue(log, libName),
-		"$sdkVersion": stringValue(log, Version),
+		"$sdkVersion": stringValue(log, b.Version),
 		"$platform":   stringValue(log, platform),
 	}
-	locationProperties(log, kind, o.location, auto)
+	locationProperties(log, kind, o.Location, auto)
 	ev := &eventsv1.Event{
 		EventId:          proto.String(id.String()),
 		AutoProperties:   auto,
@@ -102,20 +145,21 @@ func newEvent(log logger, kind, sessionID, distinctID, source string, custom map
 		DistinctId:       proto.String(distinctID),
 		Kind:             proto.String(kind),
 		OccurTime:        occurTime(log, o),
-		SessionId:        proto.String(cmp.Or(o.sessionID, sessionID)),
+		SessionId:        proto.String(cmp.Or(o.SessionID, b.SessionID)),
 	}
 	if err := protovalidate.GlobalValidator.Validate(ev); err != nil {
-		log.error("event dropped: failed validation", "kind", kind, "source", source, "violations", violations(err))
+		log.Error("event dropped: failed validation", "kind", kind, "source", source, "violations", Violations(err))
 		return nil
 	}
 	if size := proto.Size(ev); size > maxBatchBytes {
-		log.error("event dropped: too large to send", "kind", kind, "bytes", size, "limit", maxBatchBytes)
+		log.Error("event dropped: too large to send", "kind", kind, "bytes", size, "limit", maxBatchBytes)
 		return nil
 	}
 	return ev
 }
 
-func violations(err error) string {
+// Violations lists a protovalidate error's violations, comma-separated.
+func Violations(err error) string {
 	verr, ok := errors.AsType[*protovalidate.ValidationError](err)
 	if !ok {
 		return err.Error()
@@ -127,10 +171,10 @@ func violations(err error) string {
 	return strings.Join(parts, ", ")
 }
 
-func validProperties(log logger, kind string, msg proto.Message) bool {
+func validProperties(log Logger, kind string, msg proto.Message) bool {
 	if err := protovalidate.GlobalValidator.Validate(msg); err != nil {
-		log.error("event dropped: properties failed validation",
-			"kind", kind, "schema", msg.ProtoReflect().Descriptor().FullName(), "violations", violations(err))
+		log.Error("event dropped: properties failed validation",
+			"kind", kind, "schema", msg.ProtoReflect().Descriptor().FullName(), "violations", Violations(err))
 		return false
 	}
 	return true
@@ -138,7 +182,7 @@ func validProperties(log logger, kind string, msg proto.Message) bool {
 
 // Typed fields render by their proto type rather than their Go value, so a whole-number double
 // stays a double.
-func wellKnownProperties(log logger, kind string, msg protoreflect.Message, props Properties, out map[string]*commonv1.PropertyValue) bool {
+func wellKnownProperties(log Logger, kind string, msg protoreflect.Message, props Properties, out map[string]*commonv1.PropertyValue) bool {
 	md := msg.Descriptor()
 	fields := md.Fields()
 	hintProtoNames(log, kind, fields, props)
@@ -151,9 +195,9 @@ func wellKnownProperties(log logger, kind string, msg protoreflect.Message, prop
 		err := setField(msg, fd, v)
 		switch {
 		case errors.Is(err, errUnsupportedField):
-			log.warn("unsupported well-known field type; skipping", "field", fd.FullName(), "type", fd.Kind())
+			log.Warn("unsupported well-known field type; skipping", "field", fd.FullName(), "type", fd.Kind())
 		case err != nil:
-			log.error("event dropped: invalid properties",
+			log.Error("event dropped: invalid properties",
 				"kind", kind, "schema", md.FullName(), "err", fd.JSONName()+": "+err.Error())
 			return false
 		}
@@ -174,15 +218,15 @@ func wellKnownProperties(log logger, kind string, msg protoreflect.Message, prop
 
 // Fields are keyed by JSON name, as in sdk-node. A key that is a proto name is most likely a
 // slip: it doesn't set the field, and goes out as an untyped custom property.
-func hintProtoNames(log logger, kind string, fields protoreflect.FieldDescriptors, props Properties) {
+func hintProtoNames(log Logger, kind string, fields protoreflect.FieldDescriptors, props Properties) {
 	for k := range props {
 		if fd := fields.ByName(protoreflect.Name(k)); fd != nil && fd.JSONName() != k {
-			log.warn("property is not a field; did you mean its JSON name?", "kind", kind, "property", k, "json_name", fd.JSONName())
+			log.Warn("property is not a field; did you mean its JSON name?", "kind", kind, "property", k, "json_name", fd.JSONName())
 		}
 	}
 }
 
-func knownProperties(log logger, msg protoreflect.Message, out map[string]*commonv1.PropertyValue) {
+func knownProperties(log Logger, msg protoreflect.Message, out map[string]*commonv1.PropertyValue) {
 	fields := msg.Descriptor().Fields()
 	for i := range fields.Len() {
 		fd := fields.Get(i)
@@ -192,12 +236,12 @@ func knownProperties(log logger, msg protoreflect.Message, out map[string]*commo
 		if pv := knownValue(log, fd, msg.Get(fd)); pv != nil {
 			out[fd.JSONName()] = pv
 		} else {
-			log.warn("unsupported well-known field type; skipping", "field", fd.FullName(), "type", fd.Kind())
+			log.Warn("unsupported well-known field type; skipping", "field", fd.FullName(), "type", fd.Kind())
 		}
 	}
 }
 
-func knownValue(log logger, fd protoreflect.FieldDescriptor, v protoreflect.Value) *commonv1.PropertyValue {
+func knownValue(log Logger, fd protoreflect.FieldDescriptor, v protoreflect.Value) *commonv1.PropertyValue {
 	if fd.IsList() || fd.IsMap() {
 		return nil
 	}
@@ -392,11 +436,11 @@ func wholeFloat(kind protoreflect.Kind, f float64) (*big.Int, error) {
 	return big.NewInt(int64(f)), nil
 }
 
-func customProperties(log logger, kind string, props Properties, out map[string]*commonv1.PropertyValue) {
+func customProperties(log Logger, kind string, props Properties, out map[string]*commonv1.PropertyValue) {
 	for k, v := range props {
 		pv, err := customValue(log, v)
 		if err != nil {
-			log.warn("property not representable; skipping", "kind", kind, "property", k, "type", fmt.Sprintf("%T", v), "err", err)
+			log.Warn("property not representable; skipping", "kind", kind, "property", k, "type", fmt.Sprintf("%T", v), "err", err)
 			continue
 		}
 		if pv != nil {
@@ -406,7 +450,7 @@ func customProperties(log logger, kind string, props Properties, out map[string]
 }
 
 // A nil result with a nil error means the value is absent and the property is omitted.
-func customValue(log logger, v any) (*commonv1.PropertyValue, error) {
+func customValue(log Logger, v any) (*commonv1.PropertyValue, error) {
 	switch v := v.(type) {
 	case nil:
 		return nil, nil
@@ -527,7 +571,7 @@ func timeValue(t time.Time) (*commonv1.PropertyValue, error) {
 	return &commonv1.PropertyValue{Value: &commonv1.PropertyValue_TimestampValue{TimestampValue: ts}}, nil
 }
 
-func textValue(log logger, tm encoding.TextMarshaler) (pv *commonv1.PropertyValue, err error) {
+func textValue(log Logger, tm encoding.TextMarshaler) (pv *commonv1.PropertyValue, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("MarshalText panicked: %v", r)
@@ -541,7 +585,7 @@ func textValue(log logger, tm encoding.TextMarshaler) (pv *commonv1.PropertyValu
 }
 
 // HTML escaping is off so the text matches what the other SDKs send.
-func jsonValue(log logger, v any) (pv *commonv1.PropertyValue, err error) {
+func jsonValue(log Logger, v any) (pv *commonv1.PropertyValue, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("JSON encoding panicked: %v", r)
@@ -568,10 +612,10 @@ func jsonValue(log logger, v any) (pv *commonv1.PropertyValue, err error) {
 
 // Invalid UTF-8 is repaired because protobuf-go refuses to marshal it, which would fail the
 // whole batch.
-func stringValue(log logger, s string) *commonv1.PropertyValue {
+func stringValue(log Logger, s string) *commonv1.PropertyValue {
 	s = strings.ToValidUTF8(s, "\uFFFD")
 	if len(s) > maxStringBytes {
-		log.warn("property string exceeds 1024 bytes; truncating", "bytes", len(s))
+		log.Warn("property string exceeds 1024 bytes; truncating", "bytes", len(s))
 		n := maxStringBytes
 		for n > 0 && !utf8.RuneStart(s[n]) {
 			n--
@@ -613,21 +657,21 @@ func formatDuration(seconds int64, nanos int32) string {
 	return sign + whole.String() + fraction + "s"
 }
 
-func occurTime(log logger, o trackOptions) *timestamppb.Timestamp {
-	if !o.hasTimestamp {
+func occurTime(log Logger, o Options) *timestamppb.Timestamp {
+	if !o.HasTimestamp {
 		return timestamppb.Now()
 	}
-	if o.timestamp.Before(minOccurTime) || o.timestamp.After(maxOccurTime) {
-		log.warn("ignoring out-of-range track timestamp; using the current time", "timestamp", o.timestamp)
+	if o.Timestamp.Before(minOccurTime) || o.Timestamp.After(maxOccurTime) {
+		log.Warn("ignoring out-of-range track timestamp; using the current time", "timestamp", o.Timestamp)
 		return timestamppb.Now()
 	}
-	return timestamppb.New(o.timestamp)
+	return timestamppb.New(o.Timestamp)
 }
 
 // locationProperties renders a Location as geo auto-properties. The server skips geo
 // enrichment on private-key requests, which is all this SDK makes, so a dropped field is a
 // permanent hole rather than one filled in later.
-func locationProperties(log logger, kind string, loc *Location, out map[string]*commonv1.PropertyValue) {
+func locationProperties(log Logger, kind string, loc *Location, out map[string]*commonv1.PropertyValue) {
 	if loc == nil {
 		return
 	}
@@ -643,7 +687,7 @@ func locationProperties(log logger, kind string, loc *Location, out map[string]*
 		if isCountryCode(country) {
 			set("$country", country)
 		} else {
-			log.warn(`ignoring location country; expected an ISO 3166-1 alpha-2 code like "DE"`, "kind", kind, "country", loc.Country)
+			log.Warn(`ignoring location country; expected an ISO 3166-1 alpha-2 code like "DE"`, "kind", kind, "country", loc.Country)
 		}
 	}
 	set("$region", loc.Region)
@@ -663,15 +707,15 @@ func locationProperties(log logger, kind string, loc *Location, out map[string]*
 		}
 	}
 	if added == 0 {
-		log.warn("ignoring location: no usable fields; the event will carry no geo", "kind", kind)
+		log.Warn("ignoring location: no usable fields; the event will carry no geo", "kind", kind)
 	}
 }
 
 // A lone coordinate reads as a real position with the other axis at 0, so one bad axis costs
 // the pair.
-func checkCoordinate(log logger, kind, axis string, v, limit float64) bool {
+func checkCoordinate(log Logger, kind, axis string, v, limit float64) bool {
 	if math.IsNaN(v) || math.Abs(v) > limit {
-		log.warn("ignoring location coordinates: "+axis+" must be within ±"+strconv.Itoa(int(limit)),
+		log.Warn("ignoring location coordinates: "+axis+" must be within ±"+strconv.Itoa(int(limit)),
 			"kind", kind, axis, v)
 		return false
 	}

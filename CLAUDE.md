@@ -16,17 +16,18 @@ Read `docs/development.md` before touching protos or codegen, batching, well-kno
 
 ## Code
 
+- Keep the root package to the public API. Implementation belongs in `internal/ingest`; see the source layout in `docs/development.md`.
 - Don't use stdlib APIs newer than the `go` version in `go.mod`, even when the local toolchain is newer. CI also tests oldstable.
 - Ingestion (`Track`, `TrackWellKnown`, `Identify`) never returns an error or panics into the caller. It logs, drops, and reports buffered failures through `OnError`. Only reads return errors, as `*pug.Error`.
-- Log through the `logger` wrapper in `log.go`, never slog directly; it adds the `pug: ` prefix. Errors returned to users (sentinels, `New` validation) carry that prefix themselves.
+- Log through `ingest.Logger` (`internal/ingest/log.go`), never slog directly; it adds the `pug: ` prefix. Errors returned to users (sentinels, `New` validation) carry that prefix themselves.
 - Set optional proto fields with `proto.String`, `proto.Bool`, etc., not `new(x)`.
-- Tests use stdlib `testing` only (no testify or go-cmp) and the fakes in `helpers_test.go`.
-- Ask before changing an exported identifier's name, signature or behaviour. README.md's examples aren't compiled, so update them by hand.
+- Tests use stdlib `testing` only (no testify or go-cmp) and the fakes in each package's `helpers_test.go`.
+- Ask before changing a root-package exported identifier's name, signature or behaviour. README.md's examples aren't compiled, so update them by hand.
 
 ## Other SDKs
 
 - sdk-node is the reference contract. Check what it does before changing public behaviour, and record deliberate divergences under "Behaviour notes (vs sdk-node)" in `docs/development.md`. Sibling SDKs may be checked out next to this repo (`../sdk-node`, `../sdk-python`, …).
-- sdk-python, sdk-ruby and sdk-rust copy sdk-go's design, so say when a change needs porting to them. `testdata/well_known_events.golden` must stay byte-identical to sdk-python's `tests/testdata/well_known_events.golden`.
+- sdk-python, sdk-ruby and sdk-rust copy sdk-go's design, so say when a change needs porting to them. `internal/ingest/testdata/well_known_events.golden` must stay byte-identical to sdk-python's `tests/testdata/well_known_events.golden`.
 - `PROTO_COMMIT` is pinned to the same BSR commit in sdk-node, sdk-flutter, sdk-python, sdk-ruby and sdk-rust. Bump it only in lockstep with them.
 
 ## Git
