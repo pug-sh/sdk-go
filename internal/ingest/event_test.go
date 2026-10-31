@@ -107,12 +107,12 @@ func TestEventCarriesSDKAutoProperties(t *testing.T) {
 }
 
 func TestEventFailingValidationIsDropped(t *testing.T) {
-	ev, l := track(t, "my.custom", nil, Options{SessionID: "not-a-uuid"})
+	ev, l := track(t, "order completed", nil)
 	if ev != nil {
 		t.Fatal("want the event dropped")
 	}
 	r := l.find(t, slog.LevelError, "failed validation")
-	if !strings.Contains(r.attrs["violations"].(string), "session_id") {
+	if !strings.Contains(r.attrs["violations"].(string), "kind") {
 		t.Errorf("violations = %v", r.attrs["violations"])
 	}
 }
@@ -121,6 +121,17 @@ func TestEmptySessionIDKeepsTheDefault(t *testing.T) {
 	ev, _ := mustTrack(t, "my.custom", nil, Options{SessionID: ""})
 	if ev.GetSessionId() != testSession {
 		t.Errorf("session = %q", ev.GetSessionId())
+	}
+}
+
+// uuid.Validate also accepts braced and hyphenless forms, which the session_id rule refuses.
+func TestNonUUIDSessionIDKeepsTheDefault(t *testing.T) {
+	for _, id := range []string{"not-a-uuid", "{0190a5a6-0000-7000-8000-000000000002}", "0190a5a6000070008000000000000002"} {
+		ev, l := mustTrack(t, "my.custom", nil, Options{SessionID: id})
+		if ev.GetSessionId() != testSession {
+			t.Errorf("%q: session = %q, want the default", id, ev.GetSessionId())
+		}
+		l.find(t, slog.LevelWarn, "must be a UUID")
 	}
 }
 

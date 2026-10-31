@@ -19,6 +19,7 @@ import (
 
 	commonv1 "github.com/pug-sh/sdk-go/gen/common/v1"
 	eventsv1 "github.com/pug-sh/sdk-go/gen/sdk/events/v1"
+	sdkprofilesv1 "github.com/pug-sh/sdk-go/gen/sdk/profiles/v1"
 )
 
 var errUnavailable = connect.NewError(connect.CodeUnavailable, errors.New("unavailable"))
@@ -93,16 +94,45 @@ func (d *deadLetters) all() []deadLetter {
 
 var smallBatch = BatchConfig{MaxSize: 3, MaxWait: 10 * time.Second, MaxQueueSize: 5}
 
-func newTestBatcher(s Sink, cfg BatchConfig) (*Batcher, *deadLetters, *logs) {
+func newTestBatcher(s Sink[*eventsv1.Event], cfg BatchConfig) (*Batcher[*eventsv1.Event], *deadLetters, *logs) {
 	l, log := newLogs()
 	dl := &deadLetters{}
-	return NewBatcher(s, cfg, dl.record, log, 10*time.Second), dl, l
+	return NewBatcher(s, cfg, dl.record, log, 10*time.Second, EventItems), dl, l
 }
 
 func wantBatches(t *testing.T, s *fakeSink, want ...string) {
 	t.Helper()
 	if got := s.batches(); !slices.Equal(got, want) {
 		t.Errorf("sent %q, want %q", got, want)
+	}
+}
+
+func TestBatchNamesItsItemsInLogs(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		perm := connect.NewError(connect.CodeInvalidArgument, errors.New("bad"))
+		s := sinkFunc[*sdkprofilesv1.IdentifyRequest](func(context.Context, []*sdkprofilesv1.IdentifyRequest) error { return perm })
+		l, log := newLogs()
+		b := NewBatcher[*sdkprofilesv1.IdentifyRequest](s, smallBatch, nil, log, 10*time.Second, IdentifyItems)
+		b.Enqueue(&sdkprofilesv1.IdentifyRequest{ExternalId: proto.String("user_1")})
+		_ = b.Flush(t.Context())
+		if got := l.find(t, slog.LevelError, "permanent send failure; identifies dropped").attrs["identifies"]; got != int64(1) {
+			t.Errorf("identifies = %v", got)
+		}
+		_ = b.Close(t.Context())
+	})
+}
+
+func TestBatchConfigResolveWarnsOnce(t *testing.T) {
+	l, log := newLogs()
+	cfg := BatchConfig{MaxSize: 5000, MaxWait: -time.Second}.Resolve(log)
+	if want := (BatchConfig{MaxSize: 1000, MaxWait: 5 * time.Second, MaxQueueSize: 10_000}); cfg != want {
+		t.Fatalf("Resolve = %+v, want %+v", cfg, want)
+	}
+	n := len(l.warns())
+	b := NewBatcher[*eventsv1.Event](&fakeSink{}, cfg, nil, log, time.Second, EventItems)
+	defer func() { _ = b.Close(t.Context()) }()
+	if len(l.warns()) != n {
+		t.Errorf("NewBatcher warned again about a resolved config: %v", l.records)
 	}
 }
 
@@ -173,6 +203,47 @@ func TestBatchRetriesTransientErrors(t *testing.T) {
 		l.find(t, slog.LevelWarn, "transient send failure")
 		_ = b.Flush(t.Context())
 		wantBatches(t, s, "1")
+	})
+}
+
+// A send that delivered part of a chunk before failing must not resend that part.
+func TestBatchRetriesOnlyTheUnsentRemainder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &fakeSink{fail: func(_ context.Context, call int, _ []*eventsv1.Event) error {
+			if call == 1 {
+				return &PartialSendError{Sent: 2, Err: errUnavailable}
+			}
+			return nil
+		}}
+		b, dl, _ := newTestBatcher(s, BatchConfig{MaxSize: 99, MaxWait: 10 * time.Second})
+		defer b.Close(t.Context())
+		for i := 1; i <= 3; i++ {
+			b.Enqueue(ev(i))
+		}
+		_ = b.Flush(t.Context())
+		_ = b.Flush(t.Context())
+		wantBatches(t, s, "3")
+		if got := dl.all(); len(got) != 0 {
+			t.Errorf("dead letters = %v", got)
+		}
+	})
+}
+
+func TestBatchDeadLettersOnlyTheUndeliveredRemainder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		perm := connect.NewError(connect.CodeInvalidArgument, errors.New("bad"))
+		s := &fakeSink{fail: func(context.Context, int, []*eventsv1.Event) error {
+			return &PartialSendError{Sent: 1, Err: perm}
+		}}
+		b, dl, _ := newTestBatcher(s, BatchConfig{MaxSize: 99, MaxWait: 10 * time.Second})
+		defer b.Close(t.Context())
+		for i := 1; i <= 3; i++ {
+			b.Enqueue(ev(i))
+		}
+		_ = b.Flush(t.Context())
+		if got := dl.all(); len(got) != 1 || got[0].ids != "2,3" || !errors.Is(got[0].err, perm) {
+			t.Errorf("dead letters = %v, want 2,3 with the permanent error", got)
+		}
 	})
 }
 
@@ -255,7 +326,7 @@ func TestBatchSplitsByBytes(t *testing.T) {
 		}
 		return e
 	}
-	b := &Batcher{maxSize: 100}
+	b := &Batcher[*eventsv1.Event]{maxSize: 100}
 	chunks := b.split([]*eventsv1.Event{big(1), big(2), big(3), ev(4)})
 	var got []string
 	for _, c := range chunks {
@@ -539,7 +610,7 @@ func TestBatchFlushAndCloseAfterClose(t *testing.T) {
 func TestBatchContainsPanickingOnError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l, log := newLogs()
-		b := NewBatcher(&fakeSink{}, BatchConfig{MaxSize: 99, MaxQueueSize: 1}, func(error, []*eventsv1.Event) { panic("callback boom") }, log, time.Second)
+		b := NewBatcher(&fakeSink{}, BatchConfig{MaxSize: 99, MaxQueueSize: 1}, func(error, []*eventsv1.Event) { panic("callback boom") }, log, time.Second, EventItems)
 		defer b.Close(t.Context())
 		b.Enqueue(ev(1))
 		b.Enqueue(ev(2))
@@ -575,7 +646,7 @@ func TestBatchAccountsForEveryEvent(t *testing.T) {
 	}}
 	l, log := newLogs()
 	dl := &deadLetters{}
-	b := NewBatcher(s, BatchConfig{MaxSize: 50, MaxWait: time.Millisecond, MaxQueueSize: 500}, dl.record, log, time.Second)
+	b := NewBatcher(s, BatchConfig{MaxSize: 50, MaxWait: time.Millisecond, MaxQueueSize: 500}, dl.record, log, time.Second, EventItems)
 
 	const producers, perProducer = 8, 500
 	var wg sync.WaitGroup
@@ -685,7 +756,7 @@ func TestBatchLogsEveryDropWithoutOnError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := &fakeSink{fail: func(context.Context, int, []*eventsv1.Event) error { return errUnavailable }}
 		l, log := newLogs()
-		b := NewBatcher(s, BatchConfig{MaxSize: 1, MaxWait: 10 * time.Second}, nil, log, time.Second)
+		b := NewBatcher[*eventsv1.Event](s, BatchConfig{MaxSize: 1, MaxWait: 10 * time.Second}, nil, log, time.Second, EventItems)
 		b.Enqueue(ev(1))
 		synctest.Wait()
 		b.Enqueue(ev(2))

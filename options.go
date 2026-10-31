@@ -9,9 +9,9 @@ import (
 	"github.com/pug-sh/sdk-go/internal/ingest"
 )
 
-// Properties are an event's custom properties, passed to [Client.Track] or
-// [Client.TrackWellKnown] among its options; given more than once, they are merged, later keys
-// winning. Strings, booleans, integers and floats keep their type; time.Time becomes a
+// Properties are an event's custom properties as a map, for keys only known at run time,
+// passed to [Client.Track] or [Client.TrackWellKnown] among its options like a [Field]; given
+// more than once, they are merged, later keys winning. Strings, booleans, integers and floats keep their type; time.Time becomes a
 // timestamp and time.Duration a duration string like "1.5s"; json.Number is an integer when it
 // has no fraction; a value implementing encoding.TextMarshaler is sent as its text; other maps,
 // slices and structs are sent as JSON strings. Nil values are omitted, and a value that can't
@@ -20,9 +20,9 @@ type Properties map[string]any
 
 func (p Properties) applyTrack(o *trackOptions) { o.props = merge(o.props, p) }
 
-// Traits are profile properties, passed to [Client.Identify] among its options and
-// shallow-merged into the stored ones; given more than once, they are merged, later keys
-// winning. They must be JSON-serializable.
+// Traits are profile traits as a map, for keys only known at run time, passed to
+// [Client.Identify] among its options like a [Field] and shallow-merged into the stored ones;
+// given more than once, they are merged, later keys winning. They must be JSON-serializable.
 type Traits map[string]any
 
 func (t Traits) applyIdentify(o *identifyOptions) { o.traits = merge(o.traits, t) }
@@ -40,8 +40,8 @@ func merge[M ~map[string]any](dst, src M) M {
 	return out
 }
 
-// TrackOption customizes one tracked event: its [Properties], or an option such as
-// [WithTimestamp].
+// TrackOption customizes one tracked event: a [Field], its [Properties], or an option such
+// as [WithTimestamp]. Nil options are skipped.
 type TrackOption interface{ applyTrack(o *trackOptions) }
 
 type trackOption func(*trackOptions)
@@ -74,7 +74,7 @@ func WithTimestamp(t time.Time) TrackOption {
 }
 
 // WithSessionID overrides the client's per-instance session id. It must be a UUID; an empty
-// id keeps the default.
+// id keeps the default, and any other id is ignored with a warning.
 func WithSessionID(id string) TrackOption {
 	return trackOption(func(o *trackOptions) { o.SessionID = id })
 }
@@ -118,8 +118,9 @@ type Coordinates struct {
 	Longitude float64
 }
 
-// IdentifyOption customizes a [Client.Identify] call: the profile's [Traits], or an option
-// such as [WithAnonymousID].
+// IdentifyOption customizes one [Client.Identify] call: a [Field], a named trait such as
+// [Email], the profile's [Traits], or an option such as [WithAnonymousID]. Nil options are
+// skipped.
 type IdentifyOption interface{ applyIdentify(o *identifyOptions) }
 
 type identifyOption func(*identifyOptions)
@@ -127,9 +128,23 @@ type identifyOption func(*identifyOptions)
 func (f identifyOption) applyIdentify(o *identifyOptions) { f(o) }
 
 type identifyOptions struct {
+	// traits holds the fields, named traits and Traits given among the options, merged in call
+	// order; a repeated key takes the later value.
 	traits      Traits
 	anonymousID string
 	deviceID    string
+}
+
+func identifyOpts(opts []IdentifyOption) identifyOptions {
+	var o identifyOptions
+	for _, opt := range opts {
+		// A nil *Traits is an IdentifyOption through Traits' method, but calling it panics.
+		if t, ok := opt.(*Traits); opt == nil || ok && t == nil {
+			continue
+		}
+		opt.applyIdentify(&o)
+	}
+	return o
 }
 
 // WithAnonymousID names the SDK anonymous id (it must start with "anon-") whose profile is

@@ -9,11 +9,11 @@ import (
 )
 
 var (
-	// ErrClosed is reported to OnError for events that arrived after Close or were still
-	// undelivered when it finished.
+	// ErrClosed is reported to OnError for events and identifies that arrived after Close or
+	// were still undelivered when it finished.
 	ErrClosed = ingest.ErrClosed
-	// ErrQueueOverflow is reported to OnError for the oldest events, dropped to make room
-	// when the buffer is full.
+	// ErrQueueOverflow is reported to OnError for the oldest events or identifies, dropped to
+	// make room when their queue is full.
 	ErrQueueOverflow = ingest.ErrQueueOverflow
 )
 

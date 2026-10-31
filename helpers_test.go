@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -88,9 +89,18 @@ func ids(events []*Event) string {
 	return strings.Join(out, ",")
 }
 
+func externalIDs(reqs []*Identify) string {
+	out := make([]string, len(reqs))
+	for i, r := range reqs {
+		out[i] = r.GetExternalId()
+	}
+	return strings.Join(out, ",")
+}
+
 type deadLetter struct {
-	err error
-	ids string
+	err        error
+	ids        string
+	identifies string
 }
 
 // deadLetters records what OnError receives.
@@ -99,10 +109,10 @@ type deadLetters struct {
 	got []deadLetter
 }
 
-func (d *deadLetters) record(err error, events []*Event) {
+func (d *deadLetters) record(err error, lost Undelivered) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.got = append(d.got, deadLetter{err, ids(events)})
+	d.got = append(d.got, deadLetter{err: err, ids: ids(lost.Events), identifies: externalIDs(lost.Identifies)})
 }
 
 func (d *deadLetters) all() []deadLetter {
@@ -157,18 +167,65 @@ func (f *fakeEvents) sent() []*eventsv1.Event {
 type fakeProfilesSDK struct {
 	sdkprofilesv1connect.ProfilesSDKServiceClient
 
-	mu   sync.Mutex
-	reqs []*sdkprofilesv1.IdentifyRequest
-	err  error
+	mu            sync.Mutex
+	reqs          []*sdkprofilesv1.IdentifyRequest
+	err           error
+	batches       [][]*sdkprofilesv1.IdentifyRequest
+	batchErr      error
+	batchAttempts int
+	// identifyDelay makes each Identify call take this long, or fail as the Connect client does
+	// when its context ends first.
+	identifyDelay time.Duration
 }
 
-func (f *fakeProfilesSDK) Identify(_ context.Context, req *connect.Request[sdkprofilesv1.IdentifyRequest]) (*connect.Response[sdkprofilesv1.IdentifyResponse], error) {
+func (f *fakeProfilesSDK) BatchIdentify(_ context.Context, req *connect.Request[sdkprofilesv1.BatchIdentifyRequest]) (*connect.Response[sdkprofilesv1.BatchIdentifyResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.batchAttempts++
+	if f.batchErr != nil {
+		return nil, f.batchErr
+	}
+	f.batches = append(f.batches, req.Msg.GetIdentifies())
+	return connect.NewResponse(&sdkprofilesv1.BatchIdentifyResponse{}), nil
+}
+
+func (f *fakeProfilesSDK) batchCalls() [][]*sdkprofilesv1.IdentifyRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.batches)
+}
+
+// sentIdentifies flattens the BatchIdentify calls the fake received.
+func (f *fakeProfilesSDK) sentIdentifies() []*sdkprofilesv1.IdentifyRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Concat(f.batches...)
+}
+
+func (f *fakeProfilesSDK) attempts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.batchAttempts
+}
+
+// Identify records the calls that succeed.
+func (f *fakeProfilesSDK) Identify(ctx context.Context, req *connect.Request[sdkprofilesv1.IdentifyRequest]) (*connect.Response[sdkprofilesv1.IdentifyResponse], error) {
+	f.mu.Lock()
+	delay, err := f.identifyDelay, f.err
+	f.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reqs = append(f.reqs, req.Msg)
-	if f.err != nil {
-		return nil, f.err
-	}
 	return connect.NewResponse(&sdkprofilesv1.IdentifyResponse{}), nil
 }
 

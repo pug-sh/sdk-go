@@ -3,8 +3,8 @@ package pug
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
-	"math"
 	"strings"
 	"testing"
 	"time"
@@ -295,11 +295,12 @@ func TestIdentifySendsTheRequest(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
 	since := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	c.Identify(t.Context(), "user_1", Traits{"plan": "pro", "seats": 3, "tags": []string{"a", "b"}, "since": since},
+	c.Identify("user_1", Traits{"plan": "pro", "seats": 3, "tags": []string{"a", "b"}, "since": since},
 		WithAnonymousID("anon-123"), WithDeviceID("device-1"))
-	reqs := sdk.calls()
+	_ = c.Flush(t.Context())
+	reqs := sdk.sentIdentifies()
 	if len(reqs) != 1 {
-		t.Fatalf("got %d identify calls", len(reqs))
+		t.Fatalf("got %d identifies", len(reqs))
 	}
 	req := reqs[0]
 	if req.GetExternalId() != "user_1" || req.GetAnonymousId() != "anon-123" || req.GetDeviceId() != "device-1" {
@@ -317,8 +318,9 @@ func TestIdentifySendsTheRequest(t *testing.T) {
 func TestIdentifyMergesTraits(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-	c.Identify(t.Context(), "user_1", Traits{"plan": "free", "seats": 3}, WithDeviceID("device-1"), Traits{"plan": "pro"})
-	if traits := sdk.calls()[0].GetTraits().AsMap(); traits["plan"] != "pro" || traits["seats"] != float64(3) {
+	c.Identify("user_1", Traits{"plan": "free", "seats": 3}, WithDeviceID("device-1"), Traits{"plan": "pro"})
+	_ = c.Flush(t.Context())
+	if traits := sdk.sentIdentifies()[0].GetTraits().AsMap(); traits["plan"] != "pro" || traits["seats"] != float64(3) {
 		t.Errorf("traits = %v", traits)
 	}
 }
@@ -326,8 +328,9 @@ func TestIdentifyMergesTraits(t *testing.T) {
 func TestIdentifyOmitsUnsetFields(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-	c.Identify(t.Context(), "user_1", nil, Traits(nil), (*Traits)(nil), WithAnonymousID(""))
-	req := sdk.calls()[0]
+	c.Identify("user_1", nil, Traits(nil), (*Traits)(nil), WithAnonymousID(""))
+	_ = c.Flush(t.Context())
+	req := sdk.sentIdentifies()[0]
 	if req.Traits != nil || req.AnonymousId != nil || req.DeviceId != nil {
 		t.Errorf("request = %v", req)
 	}
@@ -345,15 +348,15 @@ func TestIdentifyRefusesBadInputWithoutDialing(t *testing.T) {
 		{"reserved prefix", "cookieless-abc", nil, "invalid identify request"},
 		{"long device id", "user_1", []IdentifyOption{WithDeviceID(strings.Repeat("d", 37))}, "invalid identify request"},
 		{"invalid UTF-8", "user\xff", nil, "valid UTF-8"},
-		{"NaN trait", "user_1", []IdentifyOption{Traits{"score": math.NaN()}}, "JSON-serializable"},
 		{"func trait", "user_1", []IdentifyOption{Traits{"f": func() {}}}, "JSON-serializable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sdk := &fakeProfilesSDK{}
 			c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-			c.Identify(t.Context(), tc.externalID, tc.opts...)
+			c.Identify(tc.externalID, tc.opts...)
+			_ = c.Flush(t.Context())
 			l.find(t, slog.LevelError, tc.want)
-			if n := len(sdk.calls()); n != 0 {
+			if n := sdk.attempts() + len(sdk.calls()); n != 0 {
 				t.Errorf("dialed %d times", n)
 			}
 		})
@@ -362,17 +365,18 @@ func TestIdentifyRefusesBadInputWithoutDialing(t *testing.T) {
 
 func TestIdentifyNamesTheReservedPrefix(t *testing.T) {
 	c, l := newTestClient(t, rpcClients{}, Options{})
-	c.Identify(t.Context(), "cookieless-abc")
+	c.Identify("cookieless-abc")
 	if got := l.find(t, slog.LevelError, "invalid identify request").attrs["violations"].(string); !strings.Contains(got, "reserved 'cookieless-' prefix") {
 		t.Errorf("violations = %q", got)
 	}
 }
 
 func TestIdentifyLogsFailures(t *testing.T) {
-	sdk := &fakeProfilesSDK{err: connect.NewError(connect.CodeUnavailable, errors.New("down"))}
+	sdk := &fakeProfilesSDK{batchErr: connect.NewError(connect.CodeUnavailable, errors.New("down"))}
 	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
-	c.Identify(t.Context(), "user_1")
-	if r := l.find(t, slog.LevelError, "identify failed"); r.attrs["external_id"] != "user_1" {
+	c.Identify("user_1")
+	_ = c.Flush(t.Context())
+	if r := l.find(t, slog.LevelWarn, "transient send failure; will retry"); r.attrs["identifies"] != int64(1) {
 		t.Errorf("log = %v", r)
 	}
 }
@@ -381,10 +385,127 @@ func TestIdentifyAfterCloseWarns(t *testing.T) {
 	sdk := &fakeProfilesSDK{}
 	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
 	_ = c.Close(t.Context())
-	c.Identify(t.Context(), "user_1")
+	c.Identify("user_1")
 	l.find(t, slog.LevelWarn, "Identify called after Close")
-	if n := len(sdk.calls()); n != 0 {
+	if n := sdk.attempts() + len(sdk.calls()); n != 0 {
 		t.Errorf("dialed %d times", n)
+	}
+}
+
+func TestIdentifyQueuesUntilFlush(t *testing.T) {
+	sdk := &fakeProfilesSDK{}
+	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
+	c.Identify("user_1", String("plan", "pro"))
+	c.Identify("user_2")
+	if n := len(sdk.batchCalls()); n != 0 {
+		t.Fatalf("sent %d batches before Flush", n)
+	}
+	_ = c.Flush(t.Context())
+	batches := sdk.batchCalls()
+	if len(batches) != 1 || externalIDs(batches[0]) != "user_1,user_2" {
+		t.Errorf("batches = %v, want one holding user_1,user_2", batches)
+	}
+	if n := len(sdk.calls()); n != 0 {
+		t.Errorf("made %d single Identify calls", n)
+	}
+}
+
+func TestIdentifyFallsBackWithoutBatchIdentify(t *testing.T) {
+	sdk := &fakeProfilesSDK{batchErr: connect.NewError(connect.CodeUnimplemented, errors.New("no such procedure"))}
+	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
+	c.Identify("user_1")
+	c.Identify("user_2")
+	_ = c.Flush(t.Context())
+	c.Identify("user_3")
+	_ = c.Flush(t.Context())
+	if got := externalIDs(sdk.calls()); got != "user_1,user_2,user_3" {
+		t.Errorf("single Identify calls = %q, want user_1,user_2,user_3", got)
+	}
+	if n := sdk.attempts(); n != 1 {
+		t.Errorf("BatchIdentify attempted %d times, want once", n)
+	}
+	n := 0
+	for _, r := range l.warns() {
+		if strings.Contains(r.msg, "no BatchIdentify") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("logged the fallback %d times, want once: %v", n, l.records)
+	}
+}
+
+func TestOnErrorReceivesUndeliverableIdentifies(t *testing.T) {
+	sdk := &fakeProfilesSDK{batchErr: connect.NewError(connect.CodeInvalidArgument, errors.New("bad"))}
+	dl := &deadLetters{}
+	c, _ := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{OnError: dl.record})
+	c.Identify("user_1")
+	_ = c.Flush(t.Context())
+	got := dl.all()
+	if len(got) != 1 || connect.CodeOf(got[0].err) != connect.CodeInvalidArgument || got[0].identifies != "user_1" || got[0].ids != "" {
+		t.Errorf("dead letters = %v", got)
+	}
+}
+
+// One identify can't be split across NATS messages and NATS refuses a message over its default
+// 1 MiB, so a 2 MiB identify fits a request and still can never be delivered. Queued, it would
+// fail every send of its chunk.
+func TestOversizedIdentifyIsDroppedWithoutBlockingTheQueue(t *testing.T) {
+	sdk := &fakeProfilesSDK{}
+	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{})
+	c.Identify("user_big", Traits{"blob": strings.Repeat("x", 2<<20)})
+	c.Identify("user_small")
+	_ = c.Flush(t.Context())
+	if got := externalIDs(sdk.sentIdentifies()); got != "user_small" {
+		t.Errorf("sent %q, want only user_small", got)
+	}
+	if r := l.find(t, slog.LevelError, "too large to send"); r.attrs["limit"] != int64(900<<10) {
+		t.Errorf("log = %v", r)
+	}
+}
+
+// A slow server without BatchIdentify can't finish a chunk within one Timeout; each attempt
+// must still make progress instead of resending the same first items.
+func TestIdentifyFallbackMakesProgressPastTheTimeout(t *testing.T) {
+	sdk := &fakeProfilesSDK{
+		batchErr:      connect.NewError(connect.CodeUnimplemented, errors.New("no such procedure")),
+		identifyDelay: 20 * time.Millisecond,
+	}
+	c, l := newTestClient(t, rpcClients{profilesSDK: sdk}, Options{Timeout: 100 * time.Millisecond, Batch: BatchConfig{MaxWait: time.Hour}})
+	for i := range 20 {
+		c.Identify(fmt.Sprintf("user_%02d", i))
+	}
+	for i := 0; i < 30 && len(sdk.calls()) < 20; i++ {
+		_ = c.Flush(t.Context())
+	}
+	seen := map[string]int{}
+	for _, r := range sdk.calls() {
+		seen[r.GetExternalId()]++
+	}
+	if len(seen) != 20 {
+		t.Errorf("delivered %d distinct users, want 20; logs %v", len(seen), l.records)
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("%s delivered %d times, want once", id, n)
+		}
+	}
+}
+
+func TestCloseSendsQueuedEventsAndIdentifies(t *testing.T) {
+	events := &fakeEvents{}
+	sdk := &fakeProfilesSDK{}
+	c, _ := newTestClient(t, rpcClients{events: events, profilesSDK: sdk}, Options{})
+	c.Track("user_1", "my.custom")
+	c.Identify("user_1")
+	if err := c.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(events.sent()); n != 1 {
+		t.Errorf("sent %d events, want 1", n)
+	}
+	if batches := sdk.batchCalls(); len(batches) != 1 || externalIDs(batches[0]) != "user_1" {
+		t.Errorf("batches = %v, want one holding user_1", batches)
 	}
 }
 

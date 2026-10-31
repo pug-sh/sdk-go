@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -42,6 +43,9 @@ type pugServer struct {
 	listErr    error
 	statsDelay time.Duration
 	lastGet    *profilesv1.GetByExternalIdRequest
+	// legacy serves only Identify, as a server from before BatchIdentify does, so a
+	// BatchIdentify call gets a real 404.
+	legacy bool
 }
 
 func (s *pugServer) saw(h http.Header) {
@@ -71,6 +75,15 @@ func (s *pugServer) Identify(_ context.Context, req *connect.Request[sdkprofiles
 	defer s.mu.Unlock()
 	s.identifies = append(s.identifies, req.Msg)
 	return connect.NewResponse(&sdkprofilesv1.IdentifyResponse{}), nil
+}
+
+func (s *pugServer) BatchIdentify(_ context.Context, req *connect.Request[sdkprofilesv1.BatchIdentifyRequest]) (*connect.Response[sdkprofilesv1.BatchIdentifyResponse], error) {
+	s.saw(req.Header())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := req.Msg.GetIdentifies()
+	s.identifies = append(s.identifies, items...)
+	return connect.NewResponse(&sdkprofilesv1.BatchIdentifyResponse{Accepted: proto.Uint32(uint32(len(items)))}), nil
 }
 
 func (s *pugServer) Get(_ context.Context, req *connect.Request[profilesv1.GetRequest]) (*connect.Response[profilesv1.GetResponse], error) {
@@ -141,7 +154,12 @@ func startServer(t *testing.T, srv *pugServer, opts Options) (*Client, *logs) {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.Handle(eventsv1connect.NewEventsServiceHandler(srv))
-	mux.Handle(sdkprofilesv1connect.NewProfilesSDKServiceHandler(srv))
+	if srv.legacy {
+		mux.Handle(sdkprofilesv1connect.ProfilesSDKServiceIdentifyProcedure,
+			connect.NewUnaryHandler(sdkprofilesv1connect.ProfilesSDKServiceIdentifyProcedure, srv.Identify))
+	} else {
+		mux.Handle(sdkprofilesv1connect.NewProfilesSDKServiceHandler(srv))
+	}
 	mux.Handle(profilesv1connect.NewProfilesServiceHandler(srv))
 	mux.Handle(activityv1connect.NewActivityServiceHandler(activityServer{pugServer: srv}))
 	mux.Handle(insightsv1connect.NewInsightsServiceHandler(insightsServer{pugServer: srv}))
@@ -183,16 +201,42 @@ func TestE2ETrackDelivers(t *testing.T) {
 func TestE2EIdentify(t *testing.T) {
 	srv := &pugServer{}
 	c, l := startServer(t, srv, Options{})
-	c.Identify(t.Context(), "user_42", Traits{"email": "ada@example.com", "plan": "pro"}, WithAnonymousID("anon-1"))
+	c.Identify("user_42", Email("ada@example.com"), String("plan", "pro"), WithAnonymousID("anon-1"))
+	if err := c.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	if len(srv.identifies) != 1 {
 		t.Fatalf("server got %d identifies; logs %v", len(srv.identifies), l.records)
 	}
 	req := srv.identifies[0]
-	if req.GetExternalId() != "user_42" || req.GetAnonymousId() != "anon-1" || req.GetTraits().AsMap()["plan"] != "pro" {
+	traits := req.GetTraits().AsMap()
+	if req.GetExternalId() != "user_42" || req.GetAnonymousId() != "anon-1" || traits["plan"] != "pro" || traits["email"] != "ada@example.com" {
 		t.Errorf("request = %v", req)
 	}
 	if srv.headers[0].Get("X-Api-Key") != "prv_test" {
 		t.Errorf("headers = %v", srv.headers[0])
+	}
+}
+
+func TestE2EIdentifyOnAServerWithoutBatchIdentify(t *testing.T) {
+	srv := &pugServer{legacy: true}
+	c, l := startServer(t, srv, Options{})
+	c.Identify("user_1")
+	c.Identify("user_2")
+	if err := c.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := externalIDs(srv.identifies); got != "user_1,user_2" {
+		t.Errorf("server got %q; logs %v", got, l.records)
+	}
+	n := 0
+	for _, r := range l.warns() {
+		if strings.Contains(r.msg, "no BatchIdentify") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("logged the fallback %d times, want once: %v", n, l.records)
 	}
 }
 
