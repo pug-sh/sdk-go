@@ -4,7 +4,8 @@
 
 # github.com/pug-sh/sdk-go
 
-Pug server-side SDK for Go: event tracking, profile identify, and analytics reads.
+Open-source product analytics SDK for Go, from [Pug](https://pug.sh): server-side event tracking,
+profile identify, and reads of profiles, activity, and insights.
 
 It authenticates with a **private** project API key (`prv_…`). Ingestion never fails, so a
 tracking call can't take down your request path.
