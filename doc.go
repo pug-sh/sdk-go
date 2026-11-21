@@ -1,5 +1,5 @@
-// Package pug is the Pug server-side SDK for Go: event tracking, profile identify, and
-// analytics reads.
+// Package pug is Pug's open-source product analytics SDK for Go: server-side event tracking,
+// profile identify, and reads of profiles, activity, and insights.
 //
 // A [Client] authenticates with a private project API key (prv_…). Ingestion never fails:
 // [Client.Track], [Client.TrackWellKnown] and [Client.Identify] validate their input, log and
