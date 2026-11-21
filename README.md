@@ -46,8 +46,8 @@ client.Track("user_42", "feature_used", pug.String("featureId", "export"))
 // ...or take the typed schema itself, so the fields are checked at compile time.
 client.TrackWellKnown("user_42", &commoneventsv1.FeatureUsedProperties{FeatureId: proto.String("export")})
 
-// Identify a profile. Like Track, it returns at once and never fails; identifies are queued and
-// sent in batches.
+// Identify a profile. Like Track, it never waits on the network or fails; identifies are queued
+// and sent in batches.
 client.Identify("user_42", pug.Email("ada@example.com"), pug.String("plan", "pro"))
 
 // Reads return *pug.Error, which errors.Is matches to a sentinel per status code.
@@ -70,7 +70,7 @@ err = client.Close(ctx)
 ## Behaviour
 
 - **Ingestion never fails.** `Track`, `TrackWellKnown` and `Identify` validate input client-side,
-  log and drop anything invalid, and return nothing. They are non-blocking: background
+  log and drop anything invalid, and return nothing. They never wait on the network: background
   goroutines send events and identifies in batches by size (`MaxSize`) or interval (`MaxWait`).
   Identifies go out with `BatchIdentify`; a server that predates it gets one `Identify` call each.
 - **Delivery is best-effort with retry.** A transient send failure keeps events queued and
@@ -115,12 +115,12 @@ so it must be safe for concurrent use, return promptly, and not call `Flush` or 
 ### Ingestion (never fails)
 
 - `client.Track(distinctID, kind, opts...)`: enqueue an event; `opts` holds its property
-  fields, `Properties` maps and settings. Non-blocking.
+  fields, `Properties` maps and settings. Never waits on the network.
 - `client.TrackWellKnown(distinctID, event, opts...)`: enqueue a well-known event from its typed
   message (e.g. `&commoneventsv1.PurchaseProperties{...}`); the kind comes from the schema, and
   fields or `Properties` in `opts` ride along as custom properties.
 - `client.Identify(externalID, opts...)`: queue a create-or-update of a profile; `opts` holds its
-  trait fields, named traits, `Traits` maps and settings. Non-blocking.
+  trait fields, named traits, `Traits` maps and settings. Never waits on the network.
 - `client.Flush(ctx)`: send the queued events and identifies now.
 - `client.Close(ctx)`: drain and shut down; call on graceful exit so nothing queued is lost.
   Events and identifies still undelivered when `ctx` ends are reported to `OnError`.

@@ -169,9 +169,10 @@ func newClient(rpc rpcClients, opts Options, sessionID string) *Client {
 // belongs fails to compile.
 type Kind string
 
-// Track enqueues an event of kind for distinctID and returns at once; a background goroutine
-// sends events in batches. Its properties are fields (String, Int, …) and Properties maps, in
-// the same list as the With… options. It never fails: invalid input is logged and dropped.
+// Track enqueues an event of kind for distinctID and returns without waiting on the network: a
+// background goroutine sends events in batches. Its properties are fields (String, Int, …) and
+// Properties maps, in the same list as the With… options. It never fails: invalid input is
+// logged and dropped.
 //
 // For a well-known kind such as "purchase", properties are checked against the event's schema,
 // keyed by the fields' JSON names ("productId"; "product_id" logs a warning), and other keys
@@ -233,12 +234,13 @@ func (c *Client) accept(distinctID, kind string) bool {
 	return false
 }
 
-// Identify queues a create-or-update of the profile for externalID and returns at once; a
-// background goroutine sends identifies in batches with BatchIdentify, or with one Identify
-// call each on a server that predates it. Its traits are fields (String, Int, …), named traits
-// (Name, FirstName, LastName, Email, Avatar) and Traits maps, in the same list as the With…
-// options, and are shallow-merged into the stored properties. It never fails: invalid input is
-// logged and dropped, and an identify that can't be delivered is reported to OnError.
+// Identify queues a create-or-update of the profile for externalID and returns without waiting
+// on the network: a background goroutine sends identifies in batches with BatchIdentify, or
+// with one Identify call each on a server that predates it. Its traits are fields (String,
+// Int, …), named traits (Name, FirstName, LastName, Email, Avatar) and Traits maps, in the same
+// list as the With… options, and are shallow-merged into the stored properties. It never
+// fails: invalid input is logged and dropped, and an identify that can't be delivered is
+// reported to OnError.
 func (c *Client) Identify(externalID string, opts ...IdentifyOption) {
 	defer c.recoverPanic("Identify")
 	if c.closed.Load() {
