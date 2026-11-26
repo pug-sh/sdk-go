@@ -13,7 +13,7 @@
 # never touch BSR (proto/ + gen/ are committed). To bump: run `make proto-latest` for the newest
 # commit, set PROTO_COMMIT below, then `make sync-protos && make protos` and review the diff.
 PROTO_MODULE := buf.build/pugsh/pug
-PROTO_COMMIT := 8b5d0680b10c4693b4d9d15d3dbfc663
+PROTO_COMMIT := 4b577f9e36044955bed2bb8cf15ec0c3
 
 # Re-vendor proto/ from the pinned BSR commit. `buf export` is a read-only download; --path is an
 # allowlist and buf pulls in transitive imports (buf/validate, google WKTs) automatically. Like
